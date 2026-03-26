@@ -1,0 +1,3 @@
+sample_id,R1,R2
+U1,/path/to/U1_1.fq.gz,/path/to/U1_2.fq.gz
+U2,/path/to/U2_1.fq.gz,/path/to/U2_2.fq.gz
