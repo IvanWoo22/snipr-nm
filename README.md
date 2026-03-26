@@ -1,8 +1,6 @@
 # SNIPR-Nm — Small RNA Nm Ratio Analysis Pipeline
 
-SNIPR-Nm（Small RNA Integration-based Polyadenylation and Ligation for Nm detection）是配套小 RNA 3' 端
-2'-O-甲基化（Nm）检测方法的高通量分析流程。同步输出每个小 RNA 的**表达量**和 **Nm 修饰比例**，适用于植物、动物组织或任何
-small RNA 文库。
+SNIPR-Nm（Small RNA Integration-based Polyadenylation and Ligation for Nm detection）是配套小 RNA 3' 端 2'-O-甲基化（Nm）检测方法的高通量分析流程。同步输出每个小 RNA 的**表达量**和 **Nm 修饰比例**，适用于植物、动物组织或任何 small RNA 文库。
 
 > 相关文献：Tang et al. "SNIPR-Nm reveals small RNA methylation ratio" (bioRxiv, 2025)
 
@@ -28,18 +26,15 @@ snipr-nm/
 
 ## 背景：什么是 SNIPR-Nm？
 
-3' 端 2'-O-甲基化（Nm）是调控小 RNA 稳定性与功能的重要修饰。植物中 HEN1 介导的甲基化几乎覆盖所有小 RNA；动物中 Nm 主要出现在
-piRNA 上，近期研究也发现哺乳动物 miRNA 存在部分甲基化修饰。
+3' 端 2'-O-甲基化（Nm）是调控小 RNA 稳定性与功能的重要修饰。植物中 HEN1 介导的甲基化几乎覆盖所有小 RNA；动物中 Nm 主要出现在 piRNA 上，近期研究也发现哺乳动物 miRNA 存在部分甲基化修饰。
 
 **现有技术的局限：**
-
 - 传统 small RNA-seq：依赖接头连接，Nm 修饰的 RNA 因连接效率低而被**低估**
 - Stem-loop RT-qPCR：可精确定量特定小 RNA，但**无法报告甲基化状态**
 - β-elimination 或 poly(A) 加尾 qPCR：可检测 3' Nm，但只能针对特定靶标、需要大上样量、无法绝对定量
 
 **SNIPR-Nm 的解决方案：**
 利用 poly(A) polymerase 和一种特殊连接酶的组合，在同一反应中同步检测小 RNA 的**表达量**和 **Nm 修饰比例**。具体原理：
-
 1. poly(A) polymerase 对 RNA 进行加尾处理
 2. Nm 修饰的 RNA 因 3' 端被保护而**不被加尾**；无修饰的 RNA 被添加 poly-A 尾
 3. 通过连接酶差异扩增，区分修饰与未修饰的分子
@@ -56,24 +51,30 @@ piRNA 上，近期研究也发现哺乳动物 miRNA 存在部分甲基化修饰�
 ```bash
 # 创建环境
 conda create -n snipr -c bioconda -c conda-forge \
-    cutadapt pear trnctk-typewise dammit
+    nextflow cutadapt pear tsv-utils "python>=3.9"
 
-# 额外依赖
-conda install -n snipr -c bioconda -c conda-forge \
-    python=3.11 biopython ega Tools4PcrSims
-
-# 激活并确认
+# 激活并安装 Python 依赖
 conda activate snipr
-which cutadapt pear python3 perl
+pip install biopython
+
+# pear 建议从 KantorLab 频道安装（版本更新）：
+# conda install -n snipr -c kantorlab pear
+# 若无该频道，用 bioconda 版本也可以：
+# conda install -n snipr -c bioconda pear
+
+# 确认所有工具就位
+which nextflow cutadapt pear python3 perl tsv-join
 ```
 
 **各软件作用：**
 | 软件 | 用途 |
 |------|------|
+| `nextflow` | 流程运行引擎 |
 | `cutadapt` | 去除接头序列 |
 | `pear` | 合并 PE reads |
 | `perl` | 运行 miRNA 计数脚本 |
-| `python3` | 质控脚本（需 biopython）|
+| `python3` + biopython | 质控脚本 |
+| `tsv-utils` | 合并多个样本的计数表 |
 
 ### 直接使用系统已有的软件
 
@@ -95,7 +96,6 @@ U2,/home/用户名/data/U2_1.fq.gz,/home/用户名/data/U2_2.fq.gz
 - `R1` / `R2`：FASTQ 文件的**完整绝对路径**
 
 **如何获取绝对路径？**
-
 ```bash
 cd /你的数据目录
 pwd    # 打印绝对路径
@@ -114,8 +114,7 @@ which python3
 which perl
 ```
 
-把这些路径填入 `nextflow.config` 对应行（如 `params.cutadapt_bin = "完整路径"`）。如果命令在 PATH 中能直接找到，用命令名即可（如
-`"cutadapt"`），无需完整路径。
+把这些路径填入 `nextflow.config` 对应行（如 `params.cutadapt_bin = "完整路径"`）。如果命令在 PATH 中能直接找到，用命令名即可（如 `"cutadapt"`），无需完整路径。
 
 ---
 
@@ -131,7 +130,6 @@ nextflow run SNIPR-Nm.nf \
 ```
 
 **断点续跑**（中断后恢复，跳过已完成的步骤）：
-
 ```bash
 nextflow run SNIPR-Nm.nf \
     --samplesheet samplesheet.csv \
@@ -156,7 +154,6 @@ nextflow run SNIPR-Nm.nf \
 | `--pear_min_ovlp`    | `17`                 | PEAR 最小 overlap 长度 |
 
 常用覆盖示例：
-
 ```bash
 # 使用绝对路径指定输出位置
 --outdir /home/用户名/srna_results
@@ -190,7 +187,6 @@ results/
 ```
 
 **合并表格格式**（`mirna.merged.tsv`）：
-
 ```
 Name            U1    U1_polyA  U2    U2_polyA  ...
 ath-miR156a-5p  120   3         98    5
@@ -198,7 +194,6 @@ ath-miR166b     45    1         67    2
 ath-miR167a      89   2         102   1
 ...
 ```
-
 - 每列对应一个样本的读数
 - `{样本}_polyA` 列：该样本中检测到 poly-A 尾的序列数（即**无 Nm 修饰**的分子）
 - 总读数减去 poly-A 尾读数 = **疑似 Nm 修饰**的分子
@@ -250,29 +245,22 @@ ath-miR167a      89   2         102   1
 ## 常见问题
 
 ### Q：报错 `No such file or directory`
-
 检查 `samplesheet.csv` 里的路径是否为**完整绝对路径**，文件是否真实存在：
-
 ```bash
 ls -la /完整路径/U1_1.fq.gz
 ```
 
 ### Q：质控数据全是 0 或报告无数据
-
 确认 `--outdir` 使用**绝对路径**：
-
 ```bash
 --outdir /home/用户名/srna_results
 ```
-
 相对路径（`./results`）在某些情况下会导致 Python 脚本无法找到 JSON 文件。
 
 ### Q：想增加更多样本
-
 直接在 `samplesheet.csv` 中追加行，pipeline 无需任何修改。
 
 ### Q：某步骤报错了怎么查原因
-
 ```bash
 nextflow run SNIPR-Nm.nf ... -resume
 # 查看 .nextflow.log 或对应 work 目录下的 .command.log
@@ -282,5 +270,4 @@ nextflow run SNIPR-Nm.nf ... -resume
 
 ## 参考
 
-Tang et al. "A high-throughput method SNIPR-Nm reveals small RNA methylation ratio." bioRxiv (2025). doi:
-10.64898/2025.12.11.693694
+Tang et al. "A high-throughput method SNIPR-Nm reveals small RNA methylation ratio." bioRxiv (2025). doi: 10.64898/2025.12.11.693694

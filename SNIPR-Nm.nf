@@ -201,9 +201,8 @@ process ANNOTATE_SAMPLE {
 
     script:
         """
-        sed -e "1i Name\\t${sample_id}\\t${sample_id}_polyA" \
-            -e 's/^>//' \
-            $mirna_tsv > mirna.${sample_id}.annotated.tsv
+        awk 'NR==1{print "Name\\t"sample"\\t"sample"_polyA"} {gsub(/^>/,""); print}' sample="${sample_id}" $mirna_tsv \
+            > mirna.${sample_id}.annotated.tsv
         """
 }
 
