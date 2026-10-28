@@ -1,8 +1,83 @@
-# SNIPR-Nm
+# SNIPR-Nm — Small RNA Nm Ratio Analysis Pipeline
+
+SNIPR-Nm is a high-throughput analysis workflow accompanying the experimental method for studying small-RNA abundance and 3′-terminal 2′-O-methylation (Nm). It connects the biological question—how much small RNA is present and what fraction carries terminal Nm—to reproducible sequence counts and quality-control evidence.
 
 SNIPR-Nm trims paired small-RNA reads with Cutadapt, merges pairs with PEAR, and reports separate **exact** and **polyA** counts for every supplied reference, including external controls and zero-count entries. The built-in offline QC report covers raw R1/R2, trimmed R1/R2 and merged reads.
 
 [中文说明](README_zh.md) includes setup, code-update instructions, parameter definitions and scientific interpretation.
+
+## Contents
+
+- [Background: What is SNIPR-Nm?](#background-what-is-snipr-nm)
+- [Directory structure](#directory-structure)
+- [Pipeline architecture](#pipeline-architecture)
+- [Requirements and quick start](#requirements-and-quick-start)
+- [Updating an existing installation](#updating-an-existing-installation)
+- [Inputs](#inputs)
+- [Parameters](#parameters)
+- [Count definitions and outputs](#count-definitions-and-outputs)
+- [QC, storage and limitations](#qc-storage-and-limitations)
+- [Recount from portable checkpoints](#recount-from-portable-checkpoints)
+- [FAQ](#faq)
+- [References](#references)
+
+## Background: What is SNIPR-Nm?
+
+3′-terminal 2′-O-methylation (Nm) is an important modification affecting small-RNA stability and function. It is widespread in plant small RNAs and is well established in animal piRNAs; Nm has also been reported in mammalian miRNAs. Measuring abundance together with terminal modification helps connect these molecules to their biological roles. This is the question that motivated SNIPR-Nm. See [Tang et al., 2025](https://doi.org/10.64898/2025.12.11.693694).
+
+**Why combine abundance and modification measurements?** Conventional small RNA-seq can underestimate Nm-modified molecules because of adapter-ligation bias. Standard stem-loop RT-qPCR measures selected targets but does not, by itself, identify their terminal methylation status. Modification-sensitive assays based on β-elimination or poly(A) tailing provide complementary information, while combining abundance and modification measurements across many targets remains the motivation for a sequencing-based approach.
+
+**The SNIPR-Nm experimental principle:** The method combines poly(A) polymerase with a thermostable ligase. Terminal Nm affects poly(A) addition, allowing tailing differences to carry information about modification into the sequencing library. After adapter removal and paired-read merging, the computational workflow distinguishes reads equal to a reference from reads containing that full reference followed by a qualifying poly(A) tail. The method paper reports an application to mouse testis, including piRNAs and miRNAs.
+
+The workflow supports reference-based analysis of plant or animal small RNAs and external controls when the library design and adapters are compatible. For Nm interpretation, use libraries prepared with the corresponding experimental design and its controls. The output `no_tail_fraction` is the observed `E / (E + P)` among classified reads; relating it to a biological Nm fraction requires the experimental calibration. Detailed matching rules are given under [Count definitions and outputs](#count-definitions-and-outputs).
+
+## Directory structure
+
+```text
+snipr-nm/
+├── SNIPR-Nm.nf             # Nextflow workflow
+├── nextflow.config         # Parameters and resource profiles
+├── samplesheet.csv         # Sample-sheet template; replace placeholder paths
+├── src/fastq_metrics.cpp   # Native full-file QC and sequence counting
+├── bin/                    # Input checks, preprocessing, counting and reports
+│   ├── stage_metrics.py    # Per-stage QC and merged-read counting
+│   ├── mirna_count.pl      # Reference exact/polyA matching
+│   ├── checkpoint_tools.py # Seal and verify portable counts checkpoints
+│   ├── snipr_qc.py         # Standalone Python QC compatibility entry point
+│   ├── fastq2count.pl      # Standalone Perl counting compatibility entry point
+│   └── aggregate_qc.py     # Batch QC report
+├── scripts/nextflow-local.sh
+├── README.md
+└── README_zh.md
+```
+
+The tree highlights the main entry points; `bin/` also contains helpers for trimming, PEAR, compact-mode cleanup, matrix export and HTML rendering. Supply your own reference FASTA with `--mirna_fa`; the repository does not bundle a species reference.
+
+## Pipeline architecture
+
+The original processing sequence—adapter removal, paired-read merging, sequence counting, reference matching and sample aggregation—remains the basis of the workflow. The current implementation collects QC at each stage and combines merged-read counting and QC in one scan:
+
+```text
+Paired FASTQ (R1/R2)
+    ↓
+Input validation and checksum audit → raw R1/R2 QC
+    ↓
+Cutadapt: adapter trimming → clean R1/R2 QC
+    ↓
+PEAR: paired-read merging
+    ↓
+Native scanner: sequence counts + merged QC
+    ↓
+Validated counts checkpoint
+    ↓
+Reference matching: exact / polyA
+    ↓
+Sample-labelled tables → multi-sample matrices
+
+raw + clean + merged QC → sample reports → batch SNIPR QC report
+```
+
+This diagram shows the data-processing logic. `checkpoint` runs preprocessing as separately cached steps; `compact` groups preprocessing and clean/merged QC within a sample task to reclaim its temporary FASTQ files after validation; raw QC remains independently cached. Both use the same count definitions. `--counts_sheet` enters at a verified counts checkpoint for reference recounting. The Perl sequence counter remains available for standalone use; Nextflow uses the native scanner. Reports are generated by the built-in SNIPR reporting scripts.
 
 ## Requirements and quick start
 
@@ -157,3 +232,25 @@ nextflow run SNIPR-Nm.nf --counts_sheet checkpoints.csv \
 Import validates the `snipr-counts-v1` schema, sample identity, compressed/content SHA256, unique sorted rows, read totals and QC evidence. It runs reference counting/matrix generation without raw FASTQ, scanner compilation or a new QC report, and needs no old work cache. Legacy counts without a valid manifest are not automatically trusted. Counts do not retain read IDs, qualities or pairing; preserve raw inputs.
 
 The native scanner combines full-file validation with GC, quality-sum and Q30 accumulation in one pass and uses buffered line scanning. Full-file and first-N definitions remain unchanged. The standalone Python QC and Perl counting entry points remain available for compatibility.
+
+## FAQ
+
+### An input file cannot be found
+
+Check the sample sheet and reference path, and confirm that the files exist and have finished transferring. Relative FASTQ paths are resolved against the sample-sheet directory. Software paths must identify an executable; verify its availability in the environment used to launch Nextflow.
+
+### A sample or reference has zero counts
+
+Check `cutadapt.json`, `pear.log` and the sample QC report to locate where reads were retained or lost. A sample with no reads after trimming is supported and keeps zero-count reference rows. For a reference with zero matches, check its sequence and the exact/polyA matching rules. Both relative and absolute `--outdir` paths are supported; changing the path alone does not resolve a failed task or a missing report. A failed workflow can leave partial published outputs.
+
+### Adding more samples
+
+Append unique sample IDs and mate paths to the sample sheet, then rerun the original command with `-resume` from the same launch directory and work directory. Unchanged samples can reuse their cached tasks. If removing samples or changing the analysis set, prefer a new output directory because obsolete published sample directories are not removed automatically.
+
+### Investigating a failed step
+
+Start with `.nextflow.log`, then inspect `.command.err`, `.command.out` and `.command.sh` in the failed task's work directory. Correct the reported input, dependency or resource problem before resuming with the original command plus `-resume`. Keep the work directory and `.nextflow/` cache while investigating; they contain the evidence and cached outputs needed for recovery.
+
+## References
+
+Tang Y, et al. **A high-throughput methods SNIPR-Nm reveals small RNA methylation ratio.** bioRxiv, 2025 (preprint). [doi:10.64898/2025.12.11.693694](https://doi.org/10.64898/2025.12.11.693694). Consult the method paper for experimental design, controls and interpretation of Nm ratios.

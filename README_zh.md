@@ -1,6 +1,83 @@
-# SNIPR-Nm
+# SNIPR-Nm — 小 RNA Nm 比例分析流程
+
+SNIPR-Nm 是配套小 RNA 3′ 端 2′-O-甲基化（Nm）检测方法的高通量分析流程，围绕小 RNA 的**丰度与末端修饰状态**开展分析，将实验产生的测序数据整理为可追溯的计数矩阵和质控结果。
+
+[English documentation](README.md)
 
 SNIPR-Nm 使用 Cutadapt 去接头、PEAR 合并双端 reads，再按参考序列统计 **exact** 和 **polyA** 两类读数。内置 QC 汇总原始 R1/R2、去接头 R1/R2 和合并 reads 的数量、长度及质量。流程需要明确提供参考 FASTA，不预设物种。
+
+## 目录
+
+- [背景：什么是 SNIPR-Nm？](#背景什么是-snipr-nm)
+- [目录结构](#目录结构)
+- [流程架构](#流程架构)
+- [运行环境](#运行环境)
+- [更新已安装的流程代码](#更新已安装的流程代码)
+- [输入](#输入)
+- [运行和资源](#运行和资源)
+- [计数定义与输出](#计数定义与输出)
+- [QC、磁盘与恢复边界](#qc磁盘与恢复边界)
+- [从 counts 检查点重新计数](#从-counts-检查点重新计数)
+- [常见问题](#常见问题)
+- [参考文献](#参考文献)
+
+## 背景：什么是 SNIPR-Nm？
+
+3′ 端 2′-O-甲基化（Nm）是调控小 RNA 稳定性与功能的重要修饰。植物小 RNA 中广泛存在这一修饰；动物中，piRNA 的末端 Nm 已有充分研究，哺乳动物 miRNA 中也有 Nm 修饰的报道。将小 RNA 的丰度与末端修饰状态结合起来分析，有助于理解它们的生物学作用，这也是 SNIPR-Nm 的出发点。相关研究见 [Tang 等，2025](https://doi.org/10.64898/2025.12.11.693694)。
+
+**为什么需要同时关注丰度和修饰？** 传统 small RNA-seq 依赖接头连接，连接偏好可能导致 Nm 修饰分子被低估；常规 stem-loop RT-qPCR 可定量特定小 RNA，但单独使用不能判断其末端甲基化状态。β-elimination 或 poly(A) 加尾等修饰敏感方法提供了互补信息，而在多个靶标上同时分析丰度与修饰，是发展高通量测序方法的动机。
+
+**SNIPR-Nm 的实验思路：** 将 poly(A) polymerase 与耐热连接酶结合，利用末端 Nm 对 poly(A) 加尾的影响，把修饰相关的加尾差异保留到测序文库中。计算流程去除接头、合并双端 reads 后，区分与参考完全一致的读数，以及包含完整参考序列和符合规则的 poly(A) 尾巴的读数。原方法论文报告了小鼠睾丸组织中的应用，涉及 piRNA 和 miRNA。
+
+流程可用于文库设计和接头相匹配的植物、动物小 RNA 及外参分析；用于解释 Nm 时，需要采用相应实验设计及对照。当前输出的 `no_tail_fraction` 是分类读数中的 `E / (E + P)`，从这一观测量推断生物学 Nm 比例需要实验标定。具体匹配规则见[计数定义与输出](#计数定义与输出)。
+
+## 目录结构
+
+```text
+snipr-nm/
+├── SNIPR-Nm.nf             # Nextflow 流程主文件
+├── nextflow.config         # 参数与资源配置
+├── samplesheet.csv         # 样本表模板，须替换占位路径
+├── src/fastq_metrics.cpp   # 原生全文件 QC 与序列计数
+├── bin/                    # 输入校验、预处理、计数与报告脚本
+│   ├── stage_metrics.py    # 各阶段 QC 与合并 reads 计数
+│   ├── mirna_count.pl      # 参考序列 exact/polyA 匹配
+│   ├── checkpoint_tools.py # counts 检查点封存与验证
+│   ├── snipr_qc.py         # 保留的独立 Python QC 入口
+│   ├── fastq2count.pl      # 保留的独立 Perl 序列计数入口
+│   └── aggregate_qc.py     # 批次 QC 汇总报告
+├── scripts/nextflow-local.sh
+├── README.md
+└── README_zh.md
+```
+
+以上列出主要入口；`bin/` 中还包含 Cutadapt/PEAR 调用、紧凑模式文件回收、矩阵导出及 HTML 渲染脚本。参考 FASTA 通过 `--mirna_fa` 自行提供，仓库不附带物种参考。
+
+## 流程架构
+
+流程沿用“去接头 → 双端合并 → 序列计数 → 参考匹配 → 样本汇总”的分析主线。当前版本在各阶段收集 QC，并将合并 reads 的序列计数与 QC 合并为一次扫描：
+
+```text
+双端 FASTQ（R1/R2）
+    ↓
+输入与校验和检查 → raw R1/R2 QC
+    ↓
+Cutadapt 去接头 → clean R1/R2 QC
+    ↓
+PEAR 合并双端 reads
+    ↓
+原生扫描器：序列计数 + merged QC
+    ↓
+经过验证的 counts 检查点
+    ↓
+参考序列匹配：exact / polyA
+    ↓
+添加样本列名 → 多样本计数矩阵
+
+raw + clean + merged QC → 样本报告 → SNIPR 批次汇总报告
+```
+
+上图表示数据处理逻辑。`checkpoint` 将预处理拆为可独立缓存的步骤；`compact` 将预处理和 clean/merged QC 放入样本任务，验证后回收其临时 FASTQ，raw QC 仍独立缓存；两者采用相同计数定义。`--counts_sheet` 则从已验证的 counts 检查点进入参考重计数。旧 Perl 序列计数入口仍可单独使用，Nextflow 主流程使用原生扫描器；报告由内置 SNIPR 脚本生成。
 
 ## 运行环境
 
@@ -192,3 +269,25 @@ nextflow run SNIPR-Nm.nf --counts_sheet checkpoints.csv \
 导入会核验 schema、样本、压缩和解压内容 SHA256、排序唯一性、总读数、唯一序列数及 QC 完成证据，随后只做参考计数/矩阵，不读取原始 FASTQ，也不重新生成 QC。输入为 `snipr-counts-v1` 清单，旧 counts 文件不能只改文件名冒充检查点。counts 不保留质量、read ID 或配对信息，原始数据仍需保存。更换参考无需旧 work 缓存。
 
 原生扫描器将全文件逐碱基校验、GC、质量总和和 Q30 合并为一遍统计，并采用缓冲区行扫描。全量和 first-N 统计定义保持不变。原有 Python QC 和 Perl 计数入口继续保留用于兼容。
+
+## 常见问题
+
+### 提示找不到输入文件
+
+检查样本表与参考路径，确认文件存在且上传或复制已完成。相对 FASTQ 路径以样本表所在目录为基准。软件路径须指向可执行文件，并确认启动 Nextflow 所用环境可以找到该程序。
+
+### 样本或参考的计数为零
+
+先查看 `cutadapt.json`、`pear.log` 和样本 QC 报告，确认 reads 在哪一步保留或减少。去接头后无 reads 的样本仍会正常输出零计数参考行；某条参考无匹配时，应检查参考序列及 exact/polyA 规则。`--outdir` 支持相对和绝对路径，单纯改为绝对路径不能解决任务失败或报告缺失；失败流程可能留下部分发布结果。
+
+### 想增加更多样本
+
+在样本表中追加唯一的样本 ID 及双端文件路径，再从原启动目录、使用原 work 目录，以原命令加 `-resume` 运行。未改变的样本可复用缓存。若删除样本或更换分析集合，建议使用新结果目录，因为旧样本的已发布目录不会自动删除。
+
+### 某一步报错，如何定位和恢复
+
+先看 `.nextflow.log`，再查看失败任务 work 目录中的 `.command.err`、`.command.out` 和 `.command.sh`。根据错误修正输入、依赖或资源问题后，以原命令加 `-resume` 恢复。排查期间保留 work 目录和 `.nextflow/` 缓存，以保存错误现场和可复用结果。
+
+## 参考文献
+
+Tang Y, et al. **A high-throughput methods SNIPR-Nm reveals small RNA methylation ratio.** bioRxiv, 2025（预印本）。[doi:10.64898/2025.12.11.693694](https://doi.org/10.64898/2025.12.11.693694)。实验设计、对照与 Nm 比例的解释请参阅方法论文。
