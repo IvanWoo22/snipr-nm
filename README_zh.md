@@ -51,9 +51,11 @@ nextflow run SNIPR-Nm.nf \
   -resume -with-trace trace.updated.tsv
 ```
 
-续跑时使用原输入、结果目录及 work 目录。流程代码和依赖改变后，相关任务可能重新执行，不能保证所有旧任务都命中缓存；应保留 `work/` 与 `.nextflow/`。若要独立开始一轮分析，指定新的 outdir/work 目录并省略 `-resume`。
+续跑应在原启动目录执行，以便找到原 `.nextflow/` 缓存，同时保留原输入、结果/work 目录、`-profile`、`-c` 配置及分析参数，包括 `--intermediates`。上面的命令演示使用默认参数的情形。流程代码和依赖改变后，相关任务可能重新执行，不能保证所有旧任务都命中缓存；应保留 `work/` 与 `.nextflow/`。若要独立开始一轮分析，指定新的 outdir/work 目录并省略 `-resume`。
 
 ## 输入
+
+仓库自带的 `samplesheet.csv` 是格式模板，运行前必须将占位路径替换为实际输入文件。
 
 CSV 必须包含 `sample_id,R1,R2`，可额外提供 `R1_md5,R2_md5`，对应压缩文件本身的 MD5。相对路径以 **CSV 所在目录** 为基准；含逗号的路径须按 CSV 标准加引号。单个 FASTQ 不可重复用于多个样本或两个 mate。样本 ID 仅允许字母、数字、点、下划线、连字符，须以字母或数字开头；`Name` 及以 `_polyA` 结尾的 ID 保留给输出列名。
 
@@ -109,6 +111,8 @@ nextflow run SNIPR-Nm.nf \
 | `--compact_threads` | `4` | 紧凑任务内顺序执行的 Cutadapt/PEAR 线程数 |
 | `--execution_reports` | `false` | 输出 pipeline_info 下的 trace、report 和 timeline |
 
+每轮选择一个资源 profile。命令行 `--local_cpus`、`--local_memory`、`--local_queue_size` 及工具线程参数可覆盖其默认值。若在独立的 `-c` 文件中覆盖资源，应直接设置 `executor.cpus`、`executor.memory`、`executor.queueSize` 和相应 `process` selector；只在后加载文件中修改 `params.*`，不会重新计算已经求值的配置项。参见 [Nextflow 配置规则](https://docs.seqera.io/nextflow/config)。
+
 两个模式都将 `cutadapt_opts` 解析为参数列表，支持带引号的参数值；不执行 shell 命令替换、变量展开、管道或重定向。改变接头、过滤或 PEAR 参数会改变进入计数的 reads，必须保存运行参数并重新验证。
 
 ## 计数定义与输出
@@ -158,7 +162,15 @@ results/
 
 `--intermediates checkpoint` 保留步骤级恢复：PEAR 输出压缩并回验后留在 work，磁盘用量随样本累计。`--intermediates compact` 把 clean/merged 生成、指标和计数放在一个样本任务中：验证 counts、QC 与检查点后，只删除本任务固定名单的六类临时 FASTQ，记录 `intermediates.json`；失败保留现场。紧凑模式保留 raw QC 的独立缓存，样本预处理失败则重做该组合任务；修改其 QC 参数也会重跑组合任务。它不再压缩随即就会被删除的 PEAR 大文件。两种模式都不删除原始输入。**PEAR 仍需容纳单样本未压缩输出；紧凑模式不是零临时空间，也没有整机磁盘配额保证。**
 
-精确计数在唯一序列达到 `--count_max_unique` 时写出排序分片，最多 32 路归并，计数及排序与内存路径相同；记录分片数、最大内存内唯一序列数和累计分片字节数。该阈值是唯一序列数预算，不是严格 RSS 字节上限；实际内存还受读长、有界 QC 表和解析缓冲区影响。溢写使用任务工作目录，需预留磁盘。QC 内存受采样数和读长影响，不随全量 reads 数线性增长。
+从 FASTQ 新建一轮紧凑模式分析，并保存执行报告：
+
+```bash
+nextflow run SNIPR-Nm.nf --samplesheet samplesheet.csv \
+  --mirna_fa reference.fa --intermediates compact --outdir compact-results \
+  -work-dir compact-work --execution_reports true
+```
+
+精确计数在唯一序列达到 `--count_max_unique` 时写出排序分片，最多 32 路归并，计数及排序与内存路径相同；记录分片数、最大内存内唯一序列数和累计分片字节数。该阈值是唯一序列数预算，不是严格 RSS 字节上限；实际内存还受读长、有界 QC 表和解析缓冲区影响。溢写使用任务工作目录，需预留磁盘。计数压缩和 SHA256 校验也采用流式读取，不把整个计数文件读入内存。QC 内存受采样数和读长影响，不随全量 reads 数线性增长。
 
 深度缓存仍检查内容身份。成功退出并完成全部汇总才表示批次完成，失败目录可能有部分发布结果；发布对应输出显式覆盖，防止恢复缓存后结果目录残留不同参数的旧文件。删除样本或更换输入集合时仍推荐新 outdir，因为不相关旧样本目录不会自动删除。工作目录和 `.nextflow/cache` 共同支持步骤级恢复；不要在活动任务中删除它们。工具升级需重新验证，PATH 中工具版本不会自动纳入缓存。
 
@@ -175,10 +187,6 @@ S2,/results/S2/reads.count.tsv.gz,/results/S2/counts.manifest.json
 ```bash
 nextflow run SNIPR-Nm.nf --counts_sheet checkpoints.csv \
   --mirna_fa updated_reference.fa --outdir recount -work-dir recount-work
-
-nextflow run SNIPR-Nm.nf --samplesheet samplesheet.csv \
-  --mirna_fa reference.fa --intermediates compact --outdir compact-results \
-  -work-dir compact-work --execution_reports true
 ```
 
 导入会核验 schema、样本、压缩和解压内容 SHA256、排序唯一性、总读数、唯一序列数及 QC 完成证据，随后只做参考计数/矩阵，不读取原始 FASTQ，也不重新生成 QC。输入为 `snipr-counts-v1` 清单，旧 counts 文件不能只改文件名冒充检查点。counts 不保留质量、read ID 或配对信息，原始数据仍需保存。更换参考无需旧 work 缓存。

@@ -1,7 +1,7 @@
 """Reference and matrix exports, independent of preprocessing and QC."""
 import argparse,csv
 from pathlib import Path
-from snipr_common import references,samplesheet
+from snipr_common import references
 def load_counts(path, ref_names, expected_header):
     with open(path, newline='') as fh:
         rows = list(csv.reader(fh, delimiter='\t'))
@@ -24,7 +24,8 @@ def annotate(sample, counts, fasta):
         writer.writerows([name,*v] for name,v in zip(names,values))
 
 def merge(sheet, fasta, files):
-    ids = [row['sample_id'] for row in csv.DictReader(open(sheet, newline=''), delimiter='\t')]
+    with open(sheet, newline='') as fh:
+        ids = [row['sample_id'] for row in csv.DictReader(fh, delimiter='\t')]
     refs = references(fasta); names = [name for name,_ in refs]
     by_file = {Path(f).name: f for f in files}
     expected = {f'mirna.{sid}.annotated.tsv' for sid in ids}

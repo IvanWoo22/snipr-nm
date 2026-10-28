@@ -31,7 +31,8 @@ def merged(scanner,fastq,adapter,sample_reads,max_unique):
     if expected!=observed:raise ValueError('Count compression verification failed')
     temp.replace('reads.count.tsv.gz');source.unlink()
     meta=json.loads(Path('counting.json').read_text());meta['content_sha256']=observed
-    meta['compressed_sha256']=hashlib.sha256(Path('reads.count.tsv.gz').read_bytes()).hexdigest()
+    with Path('reads.count.tsv.gz').open('rb') as f:
+        meta['compressed_sha256']=hashlib.file_digest(f,'sha256').hexdigest()
     if meta['total_reads']!=metric['total_reads']:raise ValueError('Merged count/metric mismatch')
     write_json('counting.json',meta)
     return metric

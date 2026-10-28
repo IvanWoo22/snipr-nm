@@ -54,9 +54,11 @@ nextflow run SNIPR-Nm.nf \
   -resume -with-trace trace.updated.tsv
 ```
 
-Use the original inputs, output directory and work directory when resuming. Task code and dependency changes can cause affected tasks to rerun; an update does not guarantee a fully cached run. Keep `work/` and `.nextflow/` for recovery. For an independent new run, choose new output/work directories and omit `-resume`.
+Run from the original launch directory so that Nextflow can find its `.nextflow/` cache. Keep the original inputs, output/work directories, `-profile`, `-c` configuration and analysis options, including `--intermediates`, when resuming. The command above illustrates a run using the default options. Task code and dependency changes can cause affected tasks to rerun; an update does not guarantee a fully cached run. Keep `work/` and `.nextflow/` for recovery. For an independent new run, choose new output/work directories and omit `-resume`.
 
 ## Inputs
+
+The repository's `samplesheet.csv` is a format template: replace its placeholder paths with your input files before running.
 
 CSV columns: `sample_id,R1,R2`; optional `R1_md5,R2_md5` contain MD5 checksums of the input files as delivered, including gzip compression. Relative paths resolve against the CSV directory. Quote paths containing commas.
 
@@ -91,6 +93,8 @@ A reference FASTA is required: no species is assumed. Multiline sequences, lower
 | `compact_threads` | `4` | Threads for sequential tools in a compact task |
 | `execution_reports` | `false` | Enable trace, execution report and timeline under pipeline_info |
 
+Use one resource profile per run. Command-line `--local_cpus`, `--local_memory`, `--local_queue_size` and tool-thread options override its defaults. When overriding resources in a separate `-c` file, set `executor.cpus`, `executor.memory`, `executor.queueSize` and the appropriate `process` selectors directly; changing only a late `params.*` assignment does not recompute previously derived config values. See the [Nextflow configuration rules](https://docs.seqera.io/nextflow/config).
+
 `cutadapt_opts` is parsed into an argument list in both modes. Quoted values are supported; shell substitutions, variable expansion, pipes and redirects are not evaluated. The resource budget applies to one Nextflow invocation and is a scheduling reservation, not an OS memory limit. A cluster requires a separate executor configuration; no LSF configuration is bundled.
 
 ## Count definitions and outputs
@@ -122,7 +126,15 @@ The C++17/zlib scanner is compiled and cached by BUILD_SCANNER. Metrics are gene
 
 `checkpoint` retains compressed PEAR outputs for step-level recovery. `compact` owns clean/merged temporary files inside one sample task, scans uncompressed merged reads once, verifies counts/QC/checkpoint integrity, and retires only six explicitly generated FASTQ files. Failures retain intermediate evidence. Raw QC is independently cached; changing compact-task QC parameters or recovering a failed compact task can rerun sample preprocessing. Temporary disk use scales with concurrent compact samples, but PEAR still needs its uncompressed outputs and there is no machine-wide disk quota guarantee.
 
-Exact counts spill sorted chunks when `count_max_unique` is reached and use at most 32-way merges. This is a unique-entry threshold, not an RSS byte limit: read length, parsing buffers and bounded detailed-QC tables also consume memory. Spilling adds temporary disk I/O. Counts are never approximated or truncated. The legacy Perl/Python commands remain available as compatibility entry points and semantic oracles.
+To start a new FASTQ run with compact intermediates and execution reports:
+
+```bash
+nextflow run SNIPR-Nm.nf --samplesheet samplesheet.csv \
+  --mirna_fa reference.fa --intermediates compact --outdir compact-results \
+  -work-dir compact-work --execution_reports true
+```
+
+Exact counts spill sorted chunks when `count_max_unique` is reached and use at most 32-way merges. This is a unique-entry threshold, not an RSS byte limit: read length, parsing buffers and bounded detailed-QC tables also consume memory. Spilling adds temporary disk I/O. Count compression and SHA256 verification also stream data rather than loading the entire count file into memory. Counts are never approximated or truncated. The legacy Perl/Python commands remain available as compatibility entry points and semantic oracles.
 
 Profiles: `desktop` (default 6 CPU/10 GB/6 task slots), `workstation` (8 CPU/12 GB/8 slots), and `test` (2 CPU/6 GB, single-thread tools). Each process cap is separate; total resource budgets prevent oversubscription. Local reservations are not enforced memory limits, and independent workflow runs do not share budgets.
 
@@ -140,10 +152,6 @@ S1,/results/S1/reads.count.tsv.gz,/results/S1/counts.manifest.json
 ```bash
 nextflow run SNIPR-Nm.nf --counts_sheet checkpoints.csv \
   --mirna_fa updated_reference.fa --outdir recount -work-dir recount-work
-
-nextflow run SNIPR-Nm.nf --samplesheet samplesheet.csv \
-  --mirna_fa reference.fa --intermediates compact --outdir compact-results \
-  -work-dir compact-work --execution_reports true
 ```
 
 Import validates the `snipr-counts-v1` schema, sample identity, compressed/content SHA256, unique sorted rows, read totals and QC evidence. It runs reference counting/matrix generation without raw FASTQ, scanner compilation or a new QC report, and needs no old work cache. Legacy counts without a valid manifest are not automatically trusted. Counts do not retain read IDs, qualities or pairing; preserve raw inputs.
