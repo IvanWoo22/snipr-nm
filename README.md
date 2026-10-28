@@ -2,25 +2,59 @@
 
 SNIPR-Nm trims paired small-RNA reads with Cutadapt, merges pairs with PEAR, and reports separate **exact** and **polyA** counts for every supplied reference, including external controls and zero-count entries. The built-in offline QC report covers raw R1/R2, trimmed R1/R2 and merged reads.
 
-[中文说明](README_zh.md) includes parameter definitions, scientific interpretation and validation of the 20260930 batch.
+[中文说明](README_zh.md) includes setup, code-update instructions, parameter definitions and scientific interpretation.
 
 ## Requirements and quick start
 
 Validated locally with Nextflow 25.10.4, Java 21, Cutadapt 5.2, PEAR 0.9.11, Python 3.12, Perl, gzip, a C++17 compiler and zlib development headers. Python 3.11+ uses only its standard library; Perl needs `IO::Uncompress::Gunzip`. Biopython, NumPy and tsv-join are no longer required.
 
 ```bash
-# Existing local installation, when available:
-source analysis/20260930/env.sh
-
+# Activate an environment with the dependencies listed above on PATH.
 nextflow run SNIPR-Nm.nf \
   --samplesheet samplesheet.csv \
   --mirna_fa /path/to/hsa_miRNA_external.fa \
   --outdir results -work-dir work -with-trace trace.tsv
 ```
 
-The prepared local environment uses `scripts/nextflow-local.sh` with the Java 21 module options required by the official launcher; a bare `java -jar` launcher failed to persist task caches in local validation. Use a different trace filename for each invocation.
+If you already have the Nextflow 25.10.4 JAR under `.runtime/nextflow/` or `NXF_HOME`, the optional `scripts/nextflow-local.sh` launcher includes the required Java 21 module options. Set `JAVA_HOME` for that installation. The launcher does not install dependencies. Use a different trace filename for each invocation.
 
 Use `--help` for the CLI entry point. Resume with the same command and `-resume`. On other machines, install the dependencies and put executables on PATH, or pass `--cutadapt_bin`, `--pear_bin`, `--perl_bin`, `--py_bin`, `--cxx_bin` as executable paths. Changes to installed tool versions are not automatically detected by the Nextflow cache; validate upgrades in a fresh work directory.
+
+## Updating an existing installation
+
+Wait for active pipeline runs to finish, then update the existing checkout. `origin/main` must contain the version you intend to install. Check local changes first; commit needed source edits to a separate branch or save them elsewhere before continuing. Local data and run directories do not need to be added to Git.
+
+```bash
+cd /path/to/snipr-nm
+# Review tracked source edits before proceeding.
+git status --short
+git diff --stat
+git switch main
+
+# Keep a reference to the currently installed commit, then fetch and review updates.
+git branch "codex/before-update-$(date +%Y%m%d-%H%M%S)"
+git fetch origin
+git log --oneline HEAD..origin/main
+
+# Only advance main when it can be fast-forwarded.
+git merge --ff-only origin/main
+git log -1 --oneline
+nextflow run SNIPR-Nm.nf --help
+```
+
+If Git reports conflicting local edits or diverged history, resolve those changes before updating. The commands above do not overwrite local history or delete analysis files. Updating the repository changes pipeline code; it does not install or upgrade Nextflow, Python, Cutadapt or PEAR. This version requires Python 3.11+, a C++17 compiler and zlib headers. Nextflow automatically builds and caches the scanner.
+
+To continue with an existing work directory after updating:
+
+```bash
+nextflow run SNIPR-Nm.nf \
+  --samplesheet samplesheet.csv \
+  --mirna_fa /path/to/reference.fa \
+  --outdir results -work-dir work \
+  -resume -with-trace trace.updated.tsv
+```
+
+Use the original inputs, output directory and work directory when resuming. Task code and dependency changes can cause affected tasks to rerun; an update does not guarantee a fully cached run. Keep `work/` and `.nextflow/` for recovery. For an independent new run, choose new output/work directories and omit `-resume`.
 
 ## Inputs
 

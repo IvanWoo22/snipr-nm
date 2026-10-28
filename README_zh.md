@@ -6,17 +6,52 @@ SNIPR-Nm 使用 Cutadapt 去接头、PEAR 合并双端 reads，再按参考序�
 
 本次已验证：Nextflow 25.10.4、Java 21、Cutadapt 5.2、PEAR 0.9.11、Python 3.12、系统 Perl、gzip，以及支持 C++17 的编译器和 zlib 开发库。Python 脚本仅依赖标准库；Perl 使用 `IO::Uncompress::Gunzip`。原生扫描器由 Nextflow 的 BUILD_SCANNER 编译并缓存；macOS 可使用 Xcode Command Line Tools，Linux 需要相应编译器和 zlib headers。Python 功能使用 `hashlib.file_digest`，要求 Python 3.11 或更新版本。不再需要 Biopython、NumPy、tsv-join 或在线图表库。
 
-本机已准备好的环境可直接使用：
+安装上述依赖并激活对应环境后，在项目目录中运行：
 
 ```bash
-source /Users/ivanwoo/snipr-nm/analysis/20260930/env.sh
-# 在当前 checkout 中执行，隔离 worktree 无需复制原始数据。
+# 确保 Nextflow、Java 和所需工具已加入 PATH。
 nextflow run SNIPR-Nm.nf --help
 ```
 
-本机使用 `scripts/nextflow-local.sh` 启动既有 JAR，补齐 Java 21 模块参数，已验证任务缓存恢复；不要直接使用简化的 `java -jar` 启动方式。正式运行与续跑需使用不同的 trace 文件名。
+若已在 `.runtime/nextflow/` 或 `NXF_HOME` 中安装 Nextflow 25.10.4 JAR，可使用 `scripts/nextflow-local.sh` 启动；该脚本包含 Java 21 模块参数，需要先配置相应的 `JAVA_HOME`，不会安装依赖。正式运行与续跑需使用不同的 trace 文件名。
 
 其他环境请将上述工具加入 PATH，或指定 `--cutadapt_bin`、`--pear_bin`、`--perl_bin`、`--py_bin`、`--cxx_bin` 的可执行文件路径。这些参数是文件名/路径，不是附带参数的 shell 命令。工具升级后应使用新工作目录或关闭缓存重新验证；Nextflow 不会根据 PATH 中程序的版本自动识别软件升级。
+
+## 更新已安装的流程代码
+
+等待正在运行的流程结束后，在原项目目录更新代码。以下命令从 `origin/main` 获取已经发布到远端的版本。先检查本地修改；需要保留的源码改动应先提交到独立分支或另存，再继续更新。本地数据和运行目录无需加入 Git。
+
+```bash
+cd /path/to/snipr-nm
+# 先检查是否有未保存的源码改动。
+git status --short
+git diff --stat
+git switch main
+
+# 给当前代码保留一个版本参照，再获取并查看远端更新。
+git branch "codex/before-update-$(date +%Y%m%d-%H%M%S)"
+git fetch origin
+git log --oneline HEAD..origin/main
+
+# 只允许快进更新；本地与远端分叉时会停止。
+git merge --ff-only origin/main
+git log -1 --oneline
+nextflow run SNIPR-Nm.nf --help
+```
+
+如果 Git 提示本地修改冲突或分支已经分叉，应先处理这些改动再更新；上述命令不会强行覆盖本地历史，也不删除分析文件。拉取仓库只更新流程代码，不会安装或升级 Nextflow、Python、Cutadapt 或 PEAR。此版本需要 Python 3.11+、C++17 编译器及 zlib headers；原生扫描器由 Nextflow 自动编译和缓存。
+
+更新后，若继续使用原工作目录，可执行：
+
+```bash
+nextflow run SNIPR-Nm.nf \
+  --samplesheet samplesheet.csv \
+  --mirna_fa /path/to/reference.fa \
+  --outdir results -work-dir work \
+  -resume -with-trace trace.updated.tsv
+```
+
+续跑时使用原输入、结果目录及 work 目录。流程代码和依赖改变后，相关任务可能重新执行，不能保证所有旧任务都命中缓存；应保留 `work/` 与 `.nextflow/`。若要独立开始一轮分析，指定新的 outdir/work 目录并省略 `-resume`。
 
 ## 输入
 
@@ -24,8 +59,8 @@ CSV 必须包含 `sample_id,R1,R2`，可额外提供 `R1_md5,R2_md5`，对应压
 
 ```csv
 sample_id,R1,R2
-UM-101,/path/to/UM-101_R1.fastq.gz,/path/to/UM-101_R2.fastq.gz
-UM-102,/path/to/UM-102_R1.fastq.gz,/path/to/UM-102_R2.fastq.gz
+S1,/path/to/S1_R1.fastq.gz,/path/to/S1_R2.fastq.gz
+S2,/path/to/S2_R1.fastq.gz,/path/to/S2_R2.fastq.gz
 ```
 
 FASTQ 支持普通文件和 gzip，要求标准四行记录、Phred+33、ACGTN 序列。Cutadapt 检查配对记录；后续计数/QC 检查格式和数量守恒。输入检查记录 SHA256、MD5、大小和修改时间，Cutadapt 前后再次校验压缩文件内容。提供预期 MD5 才能将交付方校验值与当前文件比较；未提供时，哈希只能证明流程期间的文件身份，不能证明上游传输已完成。必须等待上传/复制结束后再运行。
