@@ -4,19 +4,19 @@ SNIPR-Nm 使用 Cutadapt 去接头、PEAR 合并双端 reads，再按参考序�
 
 ## 运行环境
 
-本次已验证：Nextflow 25.10.4、Java 21、Cutadapt 5.2、PEAR 0.9.11、Python 3.12、系统 Perl、gzip。Python 脚本仅依赖标准库；Perl 使用 `IO::Uncompress::Gunzip`。不再需要 Biopython、NumPy、tsv-join 或在线图表库。
+本次已验证：Nextflow 25.10.4、Java 21、Cutadapt 5.2、PEAR 0.9.11、Python 3.12、系统 Perl、gzip，以及支持 C++17 的编译器和 zlib 开发库。Python 脚本仅依赖标准库；Perl 使用 `IO::Uncompress::Gunzip`。原生扫描器由 Nextflow 的 BUILD_SCANNER 编译并缓存；macOS 可使用 Xcode Command Line Tools，Linux 需要相应编译器和 zlib headers。Python 功能使用 `hashlib.file_digest`，要求 Python 3.11 或更新版本。不再需要 Biopython、NumPy、tsv-join 或在线图表库。
 
 本机已准备好的环境可直接使用：
 
 ```bash
-cd /Users/ivanwoo/snipr-nm
-source analysis/20260930/env.sh
+source /Users/ivanwoo/snipr-nm/analysis/20260930/env.sh
+# 在当前 checkout 中执行，隔离 worktree 无需复制原始数据。
 nextflow run SNIPR-Nm.nf --help
 ```
 
 本机使用 `scripts/nextflow-local.sh` 启动既有 JAR，补齐 Java 21 模块参数，已验证任务缓存恢复；不要直接使用简化的 `java -jar` 启动方式。正式运行与续跑需使用不同的 trace 文件名。
 
-其他环境请将上述工具加入 PATH，或指定 `--cutadapt_bin`、`--pear_bin`、`--perl_bin`、`--py_bin` 的可执行文件路径。这些参数是文件名/路径，不是附带参数的 shell 命令。工具升级后应使用新工作目录或关闭缓存重新验证；Nextflow 不会根据 PATH 中程序的版本自动识别软件升级。
+其他环境请将上述工具加入 PATH，或指定 `--cutadapt_bin`、`--pear_bin`、`--perl_bin`、`--py_bin`、`--cxx_bin` 的可执行文件路径。这些参数是文件名/路径，不是附带参数的 shell 命令。工具升级后应使用新工作目录或关闭缓存重新验证；Nextflow 不会根据 PATH 中程序的版本自动识别软件升级。
 
 ## 输入
 
@@ -49,7 +49,7 @@ nextflow run SNIPR-Nm.nf \
   --outdir results -work-dir work -resume
 ```
 
-默认适用于当前 8 核 / 16 GiB 本机：本地调度预算 8 CPU、12 GB、最多 2 个任务；Cutadapt 和 PEAR 各用 4 线程。资源值是 Nextflow 的调度预约，不是操作系统强制限额。不要同时启动多个全量流程并假定它们共享该预算。集群需提供对应 executor 配置，本仓库没有预置 LSF 配置。
+默认 `desktop` 配置使用 6 CPU、10 GB、6 个任务槽；单线程扫描每任务 1 CPU，各扫描 process 最多 4 个并发；精确计数最多 2 个并发。Cutadapt/PEAR 各用 4 线程，并受总预算限制。`-profile workstation` 使用 8 CPU/12 GB/8 槽；`-profile test` 使用 2 CPU/6 GB、单线程工具和较低并发。资源值是 Nextflow 的调度预约，不是操作系统强制限额。不要同时启动多个全量流程并假定它们共享该预算。集群需提供对应 executor 配置，本仓库没有预置 LSF 配置。
 
 | 参数 | 默认 | 含义 |
 |---|---|---|
@@ -64,10 +64,17 @@ nextflow run SNIPR-Nm.nf \
 | `--pear_memory` | `1G` | PEAR `-y` 的工作内存参数 |
 | `--cutadapt_threads` / `--pear_threads` | `4` / `4` | 两步骤线程数 |
 | `--qc_sample_reads` | `100000` | 各阶段详细 QC 的前 N 条 reads |
-| `--local_cpus` / `--local_memory` | `8` / `12 GB` | 本地调度预算 |
-| `--local_queue_size` | `2` | 本地并行任务上限 |
+| `--local_cpus` / `--local_memory` | `6` / `10 GB` | 本地调度预算 |
+| `--local_queue_size` | `6` | 本地并行任务上限 |
+| `--intermediates` | `checkpoint` | 步骤级缓存，或 `compact` 样本内临时文件回收 |
+| `--counts_sheet` | 空 | 已验证 counts 的样本表；设置后跳过原始数据预处理与 QC |
+| `--count_max_unique` | `1000000` | 哈希内唯一序列阈值；达到时精确溢写，不截断 reads |
+| `--qc_max_forks` / `--count_max_forks` | `4` / `2` | 各扫描/计数 process 的并发上限 |
+| `--preprocess_max_forks` | `2` | 各预处理 process 的并发上限，并非跨阶段合计 |
+| `--compact_threads` | `4` | 紧凑任务内顺序执行的 Cutadapt/PEAR 线程数 |
+| `--execution_reports` | `false` | 输出 pipeline_info 下的 trace、report 和 timeline |
 
-`cutadapt_opts` 是受信任用户提供的 shell 选项串，不应来自不可信输入。改变接头、过滤或 PEAR 参数会改变进入计数的 reads，必须保存运行参数并重新验证。
+两个模式都将 `cutadapt_opts` 解析为参数列表，支持带引号的参数值；不执行 shell 命令替换、变量展开、管道或重定向。改变接头、过滤或 PEAR 参数会改变进入计数的 reads，必须保存运行参数并重新验证。
 
 ## 计数定义与输出
 
@@ -93,8 +100,9 @@ results/
 └── S1/
     ├── input_manifest.json
     ├── cutadapt.log / cutadapt.json
-    ├── pear.log / pear.json           # PEAR 日志及中间文件压缩校验清单
+    ├── pear.log / pear.json           # pear.json 仅 checkpoint；compact 输出 intermediates.json
     ├── reads.count.tsv.gz             # sequence/count，无表头
+    ├── counts.manifest.json           # 可导入检查点、内容摘要、输入/参数与 QC 证据
     ├── mirna.count.tsv                # Name/exact/polyA，有表头
     ├── mirna.S1.annotated.tsv          # Name/S1/S1_polyA
     ├── S1_qc_metrics.json
@@ -111,19 +119,33 @@ results/
 
 校验 raw 配对数量、Cutadapt 输入/输出、PEAR 合并/未合并/丢弃的数量以及序列计数总和。去接头后为零的样本保留零计数参考行，跳过会对空输入崩溃的 PEAR。报告是自带的 SNIPR 报告，不是 MultiQC；旧 `multiqc_report.html` 文件名已改为 `snipr_qc_report.html`。
 
-PEAR 的四个 FASTQ 在任务内压缩，每个文件通过解压 SHA256 回验后才移除对应的未压缩副本；压缩版保留在 work 目录供续跑。**PEAR 运行时仍需容纳该样本全部未压缩输出**。工作目录会随样本累计，当前实现不自动删除已完成样本的缓存，也没有磁盘配额/剩余空间闸门。应在正式批量运行前预留空间，并在确认最终输出后由使用者决定是否清理 work；清理后无法复用相应缓存。
+原生扫描器按阶段计算指标；merged 序列计数和 QC 只解析一次 FASTQ。`ASSEMBLE_QC` 只读取小型指标文件，`RENDER_QC` 单独生成报告，不再在尾部重扫五个 FASTQ。各 process 仅输入实际依赖脚本：更改报告渲染不会重跑预处理或数值 QC，更改参考不重跑预处理，更改一个样本不重跑其他样本。checkpoint 模式下修改 QC 采样数会重算指标/计数，但保留 Cutadapt/PEAR 缓存。
 
-深度缓存按输入内容而非仅时间戳判断变更；相关脚本也作为任务输入。其代价是额外读取大文件、计算哈希。失败会明确报告失败，发布目录可能存在部分结果，不能据此认定整批完成；成功须以 Nextflow 正常退出和全部 QC/汇总完成为准。建议每次参数或参考版本变更使用新输出目录，避免旧结果混杂。
+`--intermediates checkpoint` 保留步骤级恢复：PEAR 输出压缩并回验后留在 work，磁盘用量随样本累计。`--intermediates compact` 把 clean/merged 生成、指标和计数放在一个样本任务中：验证 counts、QC 与检查点后，只删除本任务固定名单的六类临时 FASTQ，记录 `intermediates.json`；失败保留现场。紧凑模式保留 raw QC 的独立缓存，样本预处理失败则重做该组合任务；修改其 QC 参数也会重跑组合任务。它不再压缩随即就会被删除的 PEAR 大文件。两种模式都不删除原始输入。**PEAR 仍需容纳单样本未压缩输出；紧凑模式不是零临时空间，也没有整机磁盘配额保证。**
 
-计数阶段内存仍随唯一序列数增加；QC 的序列抽样内存随 N 和读长增加，但不再随全量 reads 数增加。五阶段全文件 QC 增加 I/O 和 CPU 开销。macOS 无容器的 Nextflow trace 不提供可靠的 CPU/RSS 指标，不能把空值当成低占用。
+精确计数在唯一序列达到 `--count_max_unique` 时写出排序分片，最多 32 路归并，计数及排序与内存路径相同；记录分片数、最大内存内唯一序列数和累计分片字节数。该阈值是唯一序列数预算，不是严格 RSS 字节上限；实际内存还受读长、有界 QC 表和解析缓冲区影响。溢写使用任务工作目录，需预留磁盘。QC 内存受采样数和读长影响，不随全量 reads 数线性增长。
 
-## 验证及本批数据的历史关系
+深度缓存仍检查内容身份。成功退出并完成全部汇总才表示批次完成，失败目录可能有部分发布结果；发布对应输出显式覆盖，防止恢复缓存后结果目录残留不同参数的旧文件。删除样本或更换输入集合时仍推荐新 outdir，因为不相关旧样本目录不会自动删除。工作目录和 `.nextflow/cache` 共同支持步骤级恢复；不要在活动任务中删除它们。工具升级需重新验证，PATH 中工具版本不会自动纳入缓存。
 
-```bash
-python3 -m unittest discover -s tests -v
-python3 tests/run_nextflow_smoke.py --evidence /path/to/smoke-evidence
+macOS 无容器的 Nextflow trace CPU/RSS 可能缺失，预约内存不代表实测峰值。`--execution_reports true` 生成 `pipeline_info/trace.tsv`、`report.html`、`timeline.html`（每轮覆盖）；如需保留各轮历史，使用新的 outdir 或显式 `-with-trace/-with-report/-with-timeline` 路径。
+
+## 从 counts 检查点重新计数
+
+```csv
+sample_id,counts,manifest
+S1,/results/S1/reads.count.tsv.gz,/results/S1/counts.manifest.json
+S2,/results/S2/reads.count.tsv.gz,/results/S2/counts.manifest.json
 ```
 
-单元回归覆盖尾巴边界、别名、外参、零计数、输入损坏、QC 分母、压缩回验和严格汇总；实际 Nextflow 测试覆盖正常运行、全任务缓存续跑、空文库及错误 MD5。
+```bash
+nextflow run SNIPR-Nm.nf --counts_sheet checkpoints.csv \
+  --mirna_fa updated_reference.fa --outdir recount -work-dir recount-work
 
-20260930 批次既有 `analysis/20260930/hsa_primary/` 是此前独立执行器处理 **21 个样本全量数据**的结果，本次代码优化不会把那些结果改称为新版 Nextflow 重跑结果。历史源文件已按原 SHA256 清单归档到 `analysis/20260930/provenance/baseline_source/`。新版根目录 Perl 计数器对 21 个全量序列计数表、每样本 2664 个 hsa miRNA/外参条目逐项核对；真实 FASTQ 验证使用 UM-101 和 UM-121 各前 10 万对 reads。证据位于 `analysis/20260930/validation/optimized_pipeline/`。
+nextflow run SNIPR-Nm.nf --samplesheet samplesheet.csv \
+  --mirna_fa reference.fa --intermediates compact --outdir compact-results \
+  -work-dir compact-work --execution_reports true
+```
+
+导入会核验 schema、样本、压缩和解压内容 SHA256、排序唯一性、总读数、唯一序列数及 QC 完成证据，随后只做参考计数/矩阵，不读取原始 FASTQ，也不重新生成 QC。输入为 `snipr-counts-v1` 清单，旧 counts 文件不能只改文件名冒充检查点。counts 不保留质量、read ID 或配对信息，原始数据仍需保存。更换参考无需旧 work 缓存。
+
+原生扫描器将全文件逐碱基校验、GC、质量总和和 Q30 合并为一遍统计，并采用缓冲区行扫描。全量和 first-N 统计定义保持不变。原有 Python QC 和 Perl 计数入口继续保留用于兼容。

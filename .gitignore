@@ -46,3 +46,6 @@ inc/
 /.runtime/
 **/__pycache__/
 *.py[cod]
+
+# Local validation evidence and benchmark artifacts
+/validation/

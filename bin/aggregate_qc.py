@@ -5,11 +5,13 @@ import csv
 import json
 from pathlib import Path
 import shutil
-from snipr_common import samplesheet, write_html
+from report_html import write_html
 
 
 def aggregate(sheet, files, outdir):
-    ids = [row['sample_id'] for row in samplesheet(sheet)]
+    with open(sheet, newline='') as fh:
+        ids = [row['sample_id'] for row in csv.DictReader(fh, delimiter='\t' if str(sheet).endswith('.tsv') else ',')]
+    if not ids or len(ids) != len(set(ids)): raise ValueError('Empty/duplicate sample order')
     indexed = {Path(f).name:Path(f) for f in files}
     suffixes = ('qc_metrics.json','quality_by_pos.json','length_dist.json','qc_report.html')
     expected = {f'{sid}_{suffix}' for sid in ids for suffix in suffixes}

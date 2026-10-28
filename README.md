@@ -6,7 +6,7 @@ SNIPR-Nm trims paired small-RNA reads with Cutadapt, merges pairs with PEAR, and
 
 ## Requirements and quick start
 
-Validated locally with Nextflow 25.10.4, Java 21, Cutadapt 5.2, PEAR 0.9.11, Python 3.12, Perl and gzip. Python uses only its standard library; Perl needs `IO::Uncompress::Gunzip`. Biopython, NumPy and tsv-join are no longer required.
+Validated locally with Nextflow 25.10.4, Java 21, Cutadapt 5.2, PEAR 0.9.11, Python 3.12, Perl, gzip, a C++17 compiler and zlib development headers. Python 3.11+ uses only its standard library; Perl needs `IO::Uncompress::Gunzip`. Biopython, NumPy and tsv-join are no longer required.
 
 ```bash
 # Existing local installation, when available:
@@ -20,7 +20,7 @@ nextflow run SNIPR-Nm.nf \
 
 The prepared local environment uses `scripts/nextflow-local.sh` with the Java 21 module options required by the official launcher; a bare `java -jar` launcher failed to persist task caches in local validation. Use a different trace filename for each invocation.
 
-Use `--help` for the CLI entry point. Resume with the same command and `-resume`. On other machines, install the dependencies and put executables on PATH, or pass `--cutadapt_bin`, `--pear_bin`, `--perl_bin`, `--py_bin` as executable paths. Changes to installed tool versions are not automatically detected by the Nextflow cache; validate upgrades in a fresh work directory.
+Use `--help` for the CLI entry point. Resume with the same command and `-resume`. On other machines, install the dependencies and put executables on PATH, or pass `--cutadapt_bin`, `--pear_bin`, `--perl_bin`, `--py_bin`, `--cxx_bin` as executable paths. Changes to installed tool versions are not automatically detected by the Nextflow cache; validate upgrades in a fresh work directory.
 
 ## Inputs
 
@@ -49,9 +49,15 @@ A reference FASTA is required: no species is assumed. Multiline sequences, lower
 | `pear_memory` | `1G` | PEAR `-y` argument |
 | `cutadapt_threads`, `pear_threads` | `4`, `4` | Thread counts |
 | `qc_sample_reads` | `100000` | First N reads per stage for detailed QC |
-| `local_cpus`, `local_memory`, `local_queue_size` | `8`, `12 GB`, `2` | Local scheduling budget |
+| `local_cpus`, `local_memory`, `local_queue_size` | `6`, `10 GB`, `6` | Desktop scheduling budget |
+| `intermediates` | `checkpoint` | Step-level cache, or task-local FASTQ retirement with `compact` |
+| `counts_sheet` | unset | Validated `sample_id,counts,manifest` CSV; skips FASTQ preprocessing/QC |
+| `count_max_unique` | `1000000` | Spill sorted exact-count chunks at this unique-sequence threshold |
+| `qc_max_forks`, `count_max_forks`, `preprocess_max_forks` | `4`, `2`, `2` | Per-process concurrency caps |
+| `compact_threads` | `4` | Threads for sequential tools in a compact task |
+| `execution_reports` | `false` | Enable trace, execution report and timeline under pipeline_info |
 
-`cutadapt_opts` is a trusted shell option string, not an untrusted data field. The resource budget applies to one Nextflow invocation and is a scheduling reservation, not an OS memory limit. A cluster requires a separate executor configuration; no LSF configuration is bundled.
+`cutadapt_opts` is parsed into an argument list in both modes. Quoted values are supported; shell substitutions, variable expansion, pipes and redirects are not evaluated. The resource budget applies to one Nextflow invocation and is a scheduling reservation, not an OS memory limit. A cluster requires a separate executor configuration; no LSF configuration is bundled.
 
 ## Count definitions and outputs
 
@@ -65,8 +71,8 @@ Published outputs:
 - `mirna.exact.tsv`, `mirna.polyA.tsv`, `mirna.classified_total.tsv`, `mirna.no_tail_fraction.tsv`: `Name,sequence` and one column per sample.
 - `reference_annotations.tsv`: every reference name and normalized sequence, including controls.
 - `<sample>/mirna.count.tsv`: `Name/exact/polyA`; `<sample>/mirna.<sample>.annotated.tsv`: sample-labelled columns.
-- `<sample>/reads.count.tsv.gz`: sorted sequence/count rows without a header.
-- `<sample>/input_manifest.json`, `cutadapt.log`, `cutadapt.json`, `pear.log`, `pear.json`: input identity, trimming statistics, merging log and validated intermediate compression records.
+- `<sample>/reads.count.tsv.gz`: sorted sequence/count rows without a header; `counts.manifest.json` seals content hashes, inputs, parameters and QC for independent reuse.
+- `<sample>/input_manifest.json`, `cutadapt.log`, `cutadapt.json`, `pear.log`, `pear.json`: input identity, trimming statistics, merging log and validated intermediate compression records (`pear.json` in checkpoint mode; `intermediates.json` in compact mode).
 - `<sample>/<sample>_qc_metrics.json`, `_quality_by_pos.json`, `_length_dist.json`, `_qc_report.html`: stage-specific QC and an offline sample report.
 - `snipr_qc_report.html`, `snipr_qc_data/`: batch report, sample summary TSV and copied QC files. These are custom SNIPR outputs, not MultiQC outputs.
 
@@ -78,19 +84,34 @@ Read counts, base counts, full length histograms, global mean quality, Q30 and G
 
 The workflow reconciles raw mate counts, Cutadapt input/output, PEAR assembled/unassembled/discarded counts and the sum of sequence counts. A library with zero reads after trimming skips PEAR, which otherwise aborts on empty input, and retains zero reference counts.
 
-PEAR's four task-local FASTQs are compressed and decompression SHA256 is checked before removing each uncompressed copy. Compressed intermediates remain in work for resume. PEAR still needs space for one sample's uncompressed outputs; work accumulates across samples. There is no automatic work cleanup or free-space gate. Confirm deliverables before explicitly cleaning work; removed tasks cannot be reused from cache.
+The C++17/zlib scanner is compiled and cached by BUILD_SCANNER. Metrics are generated per stage; merged counts and QC share one FASTQ parse. Numerical assembly and HTML rendering consume small files. Only actual script dependencies are staged, so rendering changes do not invalidate numerical tasks, reference changes reuse preprocessing, and adding/changing one sample preserves other sample caches.
 
-Deep caching hashes input content, and scripts are staged as task inputs so code changes invalidate dependent tasks. This adds hashing I/O. Failed runs may leave partial published results and are explicitly reported as failures. Prefer fresh output directories when changing parameters/references. Only a successful Nextflow exit after QC and aggregation establishes batch completion.
+`checkpoint` retains compressed PEAR outputs for step-level recovery. `compact` owns clean/merged temporary files inside one sample task, scans uncompressed merged reads once, verifies counts/QC/checkpoint integrity, and retires only six explicitly generated FASTQ files. Failures retain intermediate evidence. Raw QC is independently cached; changing compact-task QC parameters or recovering a failed compact task can rerun sample preprocessing. Temporary disk use scales with concurrent compact samples, but PEAR still needs its uncompressed outputs and there is no machine-wide disk quota guarantee.
 
-Unique-sequence counting still uses memory proportional to the number of distinct reads. Detailed QC memory scales with its sample limit and read length, rather than full-library depth. Five-stage full-file QC adds CPU/I/O time. macOS without containers does not provide reliable Nextflow trace CPU/RSS metrics.
+Exact counts spill sorted chunks when `count_max_unique` is reached and use at most 32-way merges. This is a unique-entry threshold, not an RSS byte limit: read length, parsing buffers and bounded detailed-QC tables also consume memory. Spilling adds temporary disk I/O. Counts are never approximated or truncated. The legacy Perl/Python commands remain available as compatibility entry points and semantic oracles.
 
-## Tests and historical results
+Profiles: `desktop` (default 6 CPU/10 GB/6 task slots), `workstation` (8 CPU/12 GB/8 slots), and `test` (2 CPU/6 GB, single-thread tools). Each process cap is separate; total resource budgets prevent oversubscription. Local reservations are not enforced memory limits, and independent workflow runs do not share budgets.
 
-```bash
-python3 -m unittest discover -s tests -v
-python3 tests/run_nextflow_smoke.py --evidence /path/to/smoke-evidence
+Deep caching preserves input identity checks. Published task outputs explicitly overwrite matching destinations on resume, but obsolete sample directories are not automatically removed: prefer a fresh outdir for a different sample set. Never clean active work outputs. Tool upgrades require revalidation because PATH tool versions are not automatically included in cache keys. macOS without containers may lack CPU/RSS trace metrics; missing measurements are not zero usage.
+
+`--execution_reports true` writes `pipeline_info/trace.tsv`, `report.html`, and `timeline.html`, overwriting per run. Use new outdirs or explicit `-with-trace/-with-report/-with-timeline` paths for a history.
+
+## Recount from portable checkpoints
+
+```csv
+sample_id,counts,manifest
+S1,/results/S1/reads.count.tsv.gz,/results/S1/counts.manifest.json
 ```
 
-Tests cover exhaustive short-tail rules, aliases/controls, zero counts, malformed inputs, QC denominators, safe compression, strict aggregation, real Nextflow execution/resume, empty libraries and checksum failures.
+```bash
+nextflow run SNIPR-Nm.nf --counts_sheet checkpoints.csv \
+  --mirna_fa updated_reference.fa --outdir recount -work-dir recount-work
 
-The existing `analysis/20260930/hsa_primary/` contains the earlier independent executor's **21 full-library results**. This code update does not relabel those artifacts as regenerated by the revised Nextflow workflow. Original sources are archived against their original checksum manifest in `analysis/20260930/provenance/baseline_source/`. Validation of the revised counter against all 21 full-library count tables and end-to-end pilot runs is recorded under `analysis/20260930/validation/optimized_pipeline/`.
+nextflow run SNIPR-Nm.nf --samplesheet samplesheet.csv \
+  --mirna_fa reference.fa --intermediates compact --outdir compact-results \
+  -work-dir compact-work --execution_reports true
+```
+
+Import validates the `snipr-counts-v1` schema, sample identity, compressed/content SHA256, unique sorted rows, read totals and QC evidence. It runs reference counting/matrix generation without raw FASTQ, scanner compilation or a new QC report, and needs no old work cache. Legacy counts without a valid manifest are not automatically trusted. Counts do not retain read IDs, qualities or pairing; preserve raw inputs.
+
+The native scanner combines full-file validation with GC, quality-sum and Q30 accumulation in one pass and uses buffered line scanning. Full-file and first-N definitions remain unchanged. The standalone Python QC and Perl counting entry points remain available for compatibility.
