@@ -109,7 +109,7 @@ xcode-select --install
 其他 Linux 发行版安装对应的 C++ 编译器及 zlib 开发包。确认环境中的工具可用：
 
 ```bash
-command -v nextflow java cutadapt pear python3 perl gzip c++
+command -v nextflow java cutadapt pear python3 perl gzip git c++
 nextflow -version
 java -version
 python3 --version
@@ -127,11 +127,11 @@ cp samplesheet.csv my_samples.csv
 nextflow run SNIPR-Nm.nf --help
 ```
 
-编辑 `my_samples.csv`，保留 `sample_id,R1,R2` 表头，在下方填写真实样本名和双端 FASTQ 路径；再准备与研究物种、目标 RNA 及外参相符的参考 FASTA。格式示例和约束见[输入](#输入)。每次打开新终端运行前，先执行 `conda activate snipr`。
+编辑 `my_samples.csv`，保留 `sample_id,R1,R2` 表头，在下方填写真实样本名和双端 FASTQ 路径；再准备与研究物种、目标 RNA 及外参相符的参考 FASTA。格式示例和约束见[输入](#输入)。使用上述 Conda 环境时，每次打开新终端先执行 `conda activate snipr`。
 
 ### 3. 保存配置并运行
 
-在项目目录新建自己的 `run.config`，替换参考路径，并核对接头是否与文库一致：
+在项目目录新建自己的 `run.config`，替换参考路径，并核对接头是否与文库一致。配置中的相对样本表、参考及输出路径以启动目录为基准：
 
 ```groovy
 params {
@@ -175,9 +175,9 @@ nextflow run SNIPR-Nm.nf --help
 
 ## 输入
 
-仓库自带的 `samplesheet.csv` 是格式模板，运行前必须将占位路径替换为实际输入文件。
+仓库自带的 `samplesheet.csv` 是格式模板。另存为 `my_samples.csv` 后，将占位路径替换为实际输入文件。
 
-CSV 必须包含 `sample_id,R1,R2`，可额外提供 `R1_md5,R2_md5`，对应压缩文件本身的 MD5。相对路径以 **CSV 所在目录** 为基准；含逗号的路径须按 CSV 标准加引号。单个 FASTQ 不可重复用于多个样本或两个 mate。样本 ID 仅允许字母、数字、点、下划线、连字符，须以字母或数字开头；`Name` 及以 `_polyA` 结尾的 ID 保留给输出列名。
+CSV 必须包含 `sample_id,R1,R2`，可额外提供 `R1_md5,R2_md5`，对应输入文件本身的 MD5（gzip 数据填写压缩文件的 MD5）。相对路径以 **CSV 所在目录** 为基准；含逗号的路径须按 CSV 标准加引号。空样本表和重复样本 ID 会报错；单个 FASTQ 不可重复用于多个样本或两个 mate。样本 ID 仅允许英文字母、数字、点、下划线、连字符，须以英文字母或数字开头；`Name` 及以 `_polyA` 结尾的 ID 保留给输出列名。
 
 ```csv
 sample_id,R1,R2
@@ -185,33 +185,66 @@ S1,/path/to/S1_R1.fastq.gz,/path/to/S1_R2.fastq.gz
 S2,/path/to/S2_R1.fastq.gz,/path/to/S2_R2.fastq.gz
 ```
 
-FASTQ 支持普通文件和 gzip，要求标准四行记录、Phred+33、ACGTN 序列。Cutadapt 检查配对记录；后续计数/QC 检查格式和数量守恒。输入检查记录 SHA256、MD5、大小和修改时间，Cutadapt 前后再次校验压缩文件内容。提供预期 MD5 才能将交付方校验值与当前文件比较；未提供时，哈希只能证明流程期间的文件身份，不能证明上游传输已完成。必须等待上传/复制结束后再运行。
+FASTQ 支持普通文件和 gzip，要求标准四行记录、Phred+33、ACGTN 序列。Cutadapt 检查配对记录；后续计数/QC 检查格式和数量守恒。输入检查记录 SHA256、MD5、大小和修改时间，Cutadapt 前后再次校验输入文件内容。提供预期 MD5 才能将交付方校验值与当前文件比较；未提供时，哈希只能证明流程期间的文件身份，不能证明上游传输已完成。必须等待上传/复制结束后再运行。
 
 参考 FASTA 支持多行序列、大小写及 U→T 标准化；序列须为 ACGTN 且至少 4 nt。保留完整 header、顺序、全部条目和零计数，包括外参。重复名称报错；同序列不同名称分别输出，因此**不能将所有参考行相加当作去重后的匹配 reads 数**。本流程不会自动从混合参考中筛选 miRNA；要只分析 miRNA 和外参，须输入相应参考子集。
 
 ## 运行和资源
 
-```bash
-nextflow run SNIPR-Nm.nf \
-  --samplesheet samplesheet.csv \
-  --mirna_fa /path/to/hsa_miRNA_external.fa \
-  --outdir results \
-  -work-dir work \
-  -with-trace trace.tsv
+### 启动与续跑
 
-# 保留同一 work 目录，增加 -resume 即可续跑
-nextflow run SNIPR-Nm.nf \
-  --samplesheet samplesheet.csv \
-  --mirna_fa /path/to/hsa_miRNA_external.fa \
-  --outdir results -work-dir work -resume
+完成上面的首次运行后，使用原 `run.config`、启动目录、输入和 work 目录续跑；如原命令使用了 profile 或额外命令行参数，也应保留：
+
+```bash
+nextflow run SNIPR-Nm.nf -c run.config \
+  -work-dir work -resume -with-trace trace.resume.tsv
 ```
 
-默认 `desktop` 配置使用 6 CPU、10 GB、6 个任务槽；单线程扫描每任务 1 CPU，各扫描 process 最多 4 个并发；精确计数最多 2 个并发。Cutadapt/PEAR 各用 4 线程，并受总预算限制。`-profile workstation` 使用 8 CPU/12 GB/8 槽；`-profile test` 使用 2 CPU/6 GB、单线程工具和较低并发。资源值是 Nextflow 的调度预约，不是操作系统强制限额。不要同时启动多个全量流程并假定它们共享该预算。集群需提供对应 executor 配置，本仓库没有预置 LSF 配置。
+也可以直接在命令行指定输入，启动一轮分析：
+
+```bash
+nextflow run SNIPR-Nm.nf \
+  --samplesheet my_samples.csv --mirna_fa /path/to/reference.fa \
+  --outdir results -work-dir work -with-trace trace.tsv
+```
+
+命令行 `--参数` 会覆盖 `run.config` 中对应的 `params` 值。`-c`、`-profile`、`-work-dir`、`-resume` 属于 Nextflow 选项，使用单横线；流程参数使用双横线。若独立开始一轮分析，指定新的结果/work 目录及 trace 文件名，并省略 `-resume`。
+
+### 查看进度和结果
+
+运行时可在另一个终端查看 `.nextflow.log`；正常结束并显示 `SNIPR-Nm completed successfully` 后，查看结果表：
+
+```bash
+tail -n 20 .nextflow.log
+head -n 5 results/mirna.merged.tsv
+head -n 5 results/mirna.no_tail_fraction.tsv
+head -n 5 results/snipr_qc_data/sample_summary.tsv
+```
+
+在浏览器打开 `results/snipr_qc_report.html`：macOS 可用 `open results/snipr_qc_report.html`，有桌面的 Linux 可用 `xdg-open results/snipr_qc_report.html`。远程服务器上可将 HTML 报告和 `snipr_qc_data/` 复制到本机离线查看。若修改了输出目录，请替换上述 `results` 路径。
+
+### 资源配置与参数
+
+| Profile | CPU 预算 | 内存预算 | 任务槽 | Cutadapt / PEAR / compact 线程 |
+|---|---|---|---|---|
+| `desktop`（默认） | 6 | 10 GB | 6 | 4 / 4 / 4 |
+| `workstation` | 8 | 12 GB | 8 | 4 / 4 / 4 |
+| `test` | 2 | 6 GB | 4 | 1 / 1 / 1 |
+
+例如，使用 workstation 配置独立启动一轮分析：
+
+```bash
+nextflow run SNIPR-Nm.nf -c run.config -profile workstation \
+  --outdir results-workstation -work-dir work-workstation \
+  -with-trace trace.workstation.tsv
+```
+
+每个扫描任务使用 1 CPU；默认各 QC process 最多 4 个任务并发，各计数或预处理 process 最多 2 个并发，`test` 会降低 QC 和预处理并发上限。总预算用于单次流程的资源调度预约，不是操作系统强制限额；独立运行的多个流程不共享预算。集群需提供对应 executor 配置，本仓库没有预置 LSF 配置。
 
 | 参数 | 默认 | 含义 |
 |---|---|---|
 | `--samplesheet` | `samplesheet.csv` | 输入样本表 |
-| `--mirna_fa` | 必填 | miRNA/外参参考 FASTA |
+| `--mirna_fa` | 必填 | 小 RNA/外参参考 FASTA |
 | `--outdir` | `./results` | 发布目录 |
 | `--adaptor_r1` | `AGATCGGAAGAGCACA` | R1 的 3′ 接头 |
 | `--adaptor_r2` | `GATCGTCGGACTGTAGAA` | R2 的 3′ 接头 |
@@ -234,6 +267,19 @@ nextflow run SNIPR-Nm.nf \
 每轮选择一个资源 profile。命令行 `--local_cpus`、`--local_memory`、`--local_queue_size` 及工具线程参数可覆盖其默认值。若在独立的 `-c` 文件中覆盖资源，应直接设置 `executor.cpus`、`executor.memory`、`executor.queueSize` 和相应 `process` selector；只在后加载文件中修改 `params.*`，不会重新计算已经求值的配置项。参见 [Nextflow 配置规则](https://docs.seqera.io/nextflow/config)。
 
 两个模式都将 `cutadapt_opts` 解析为参数列表，支持带引号的参数值；不执行 shell 命令替换、变量展开、管道或重定向。改变接头、过滤或 PEAR 参数会改变进入计数的 reads，必须保存运行参数并重新验证。
+
+### 默认 Cutadapt 过滤规则
+
+| 选项 | 含义 |
+|---|---|
+| `-O 5` | 接头至少有 5 个碱基与 read 对齐 |
+| `-m 17` | 去接头后短于 17 nt 的 reads 被丢弃 |
+| `-e 0.18` | 接头匹配的最大错误率为 0.18 |
+| `--discard-untrimmed` | 丢弃未检测到接头的 reads |
+
+本流程为两个 mate 都提供接头；默认 `--pair-filter=any` 下，任一端触发过滤就丢弃整对。上述默认值不额外启用 `-q` 质量修剪。参见 [Cutadapt 5.2 文档](https://cutadapt.readthedocs.io/en/v5.2/guide.html#filtering-paired-end-reads)。
+
+`--cutadapt_opts` 会替换整串默认选项。命令行应给完整字符串加引号，或在 `run.config` 中设置 `params.cutadapt_opts`；增加 `-q`、`--max-n`、`-M` 等选项时，应同时保留仍需使用的默认规则。
 
 ## 计数定义与输出
 
@@ -270,23 +316,35 @@ results/
     └── S1_qc_report.html
 ```
 
+计数表以制表符分隔。`mirna.merged.tsv` 中不带后缀的样本列（如 `S1`）是 **E**，`S1_polyA` 是 **P**；E+P 和无尾比例分别直接读取 `mirna.classified_total.tsv`、`mirna.no_tail_fraction.tsv`，无需另写计算脚本。`reads.count.tsv.gz` 每行记录一条合并 read 的唯一序列及其出现次数，尚未按参考匹配。`S1/` 表示一个样本目录。`cutadapt.log`/`cutadapt.json` 用于查看接头命中和过滤保留量，`pear.log` 用于查看合并、未合并及丢弃数量。
+
 所有矩阵遵循 samplesheet 的样本顺序及 FASTA 的参考顺序。汇总只读 Nextflow 已暂存的文件，缺少样本或参考不一致会报错。单独运行 `perl bin/mirna_count.pl counts.tsv[.gz] reference.fa` 仍输出旧式无表头 TSV；加 `--header` 则输出 Name/exact/polyA。`fastq2count.pl` 接受 stdin 或一个 FASTQ 路径。
 
 ## QC、磁盘与恢复边界
 
-每个样本对 raw R1/R2、clean R1/R2、merged 五个阶段做全文件 reads、bases、长度分布、平均质量、Q30 和 GC 统计。18–25 nt 比例的分母是该文件**所有 reads**，大于 50 nt 的 reads 也保留。位置质量、序列冗余、二核苷酸熵及完整接头 motif 使用各阶段前 N 条 reads，明确记录样本量，不能当作随机抽样估计。序列冗余不是 PCR duplication；完整 motif 命中率不等于部分接头残留率。空分母输出 null/NA。QC 不会过滤 reads。
+报告区分全文件指标和前 N 条 reads 的详细指标：
+
+| 指标 | 统计范围与含义 |
+|---|---|
+| reads、bases、长度分布 | raw R1/R2、clean R1/R2、merged 五个文件的全部记录 |
+| 平均质量、Q30、GC | 全部碱基；Q30 是 Phred ≥30 的碱基比例，GC 为 (G+C)/全部碱基，分母包含 N |
+| 18–25 nt 比例 | 该长度 reads / 全部 reads，分母包含长于 50 nt 的 reads；不代表 miRNA 身份判定 |
+| 去接头 / 合并保留率 | clean pairs/raw pairs、merged pairs/clean pairs，见 `snipr_qc_data/sample_summary.tsv` |
+| 位置质量、序列冗余、二核苷酸熵、完整接头 motif | 各阶段前 `qc_sample_reads` 条 reads，记录实际样本量，不是随机抽样 |
+
+序列冗余不是 PCR duplication，完整 motif 命中率不等于部分接头残留率。空分母输出 null/NA，QC 不过滤 reads。指标应结合文库设计、RNA 类型及对照解释，不设跨文库通用的合格阈值。
 
 校验 raw 配对数量、Cutadapt 输入/输出、PEAR 合并/未合并/丢弃的数量以及序列计数总和。去接头后为零的样本保留零计数参考行，跳过会对空输入崩溃的 PEAR。报告是自带的 SNIPR 报告，不是 MultiQC；旧 `multiqc_report.html` 文件名已改为 `snipr_qc_report.html`。
 
-原生扫描器按阶段计算指标；merged 序列计数和 QC 只解析一次 FASTQ。`ASSEMBLE_QC` 只读取小型指标文件，`RENDER_QC` 单独生成报告，不再在尾部重扫五个 FASTQ。各 process 仅输入实际依赖脚本：更改报告渲染不会重跑预处理或数值 QC，更改参考不重跑预处理，更改一个样本不重跑其他样本。checkpoint 模式下修改 QC 采样数会重算指标/计数，但保留 Cutadapt/PEAR 缓存。
+原生扫描器将全文件逐碱基校验、GC、质量总和和 Q30 合并为一遍统计，并采用缓冲区行扫描；全量和 first-N 定义保持不变。它按阶段计算指标；merged 序列计数和 QC 只解析一次 FASTQ。`ASSEMBLE_QC` 只读取小型指标文件，`RENDER_QC` 单独生成报告，不再在尾部重扫五个 FASTQ。各 process 仅输入实际依赖脚本：更改报告渲染不会重跑预处理或数值 QC，更改参考不重跑预处理，更改一个样本不重跑其他样本。checkpoint 模式下修改 QC 采样数会重算指标/计数，但保留 Cutadapt/PEAR 缓存。
 
 `--intermediates checkpoint` 保留步骤级恢复：PEAR 输出压缩并回验后留在 work，磁盘用量随样本累计。`--intermediates compact` 把 clean/merged 生成、指标和计数放在一个样本任务中：验证 counts、QC 与检查点后，只删除本任务固定名单的六类临时 FASTQ，记录 `intermediates.json`；失败保留现场。紧凑模式保留 raw QC 的独立缓存，样本预处理失败则重做该组合任务；修改其 QC 参数也会重跑组合任务。它不再压缩随即就会被删除的 PEAR 大文件。两种模式都不删除原始输入。**PEAR 仍需容纳单样本未压缩输出；紧凑模式不是零临时空间，也没有整机磁盘配额保证。**
 
 从 FASTQ 新建一轮紧凑模式分析，并保存执行报告：
 
 ```bash
-nextflow run SNIPR-Nm.nf --samplesheet samplesheet.csv \
-  --mirna_fa reference.fa --intermediates compact --outdir compact-results \
+nextflow run SNIPR-Nm.nf -c run.config \
+  --intermediates compact --outdir compact-results \
   -work-dir compact-work --execution_reports true
 ```
 
@@ -297,6 +355,8 @@ nextflow run SNIPR-Nm.nf --samplesheet samplesheet.csv \
 macOS 无容器的 Nextflow trace CPU/RSS 可能缺失，预约内存不代表实测峰值。`--execution_reports true` 生成 `pipeline_info/trace.tsv`、`report.html`、`timeline.html`（每轮覆盖）；如需保留各轮历史，使用新的 outdir 或显式 `-with-trace/-with-report/-with-timeline` 路径。
 
 ## 从 counts 检查点重新计数
+
+将以下列保存为 `checkpoints.csv`；相对路径以该 CSV 所在目录为基准：
 
 ```csv
 sample_id,counts,manifest
@@ -309,9 +369,7 @@ nextflow run SNIPR-Nm.nf --counts_sheet checkpoints.csv \
   --mirna_fa updated_reference.fa --outdir recount -work-dir recount-work
 ```
 
-导入会核验 schema、样本、压缩和解压内容 SHA256、排序唯一性、总读数、唯一序列数及 QC 完成证据，随后只做参考计数/矩阵，不读取原始 FASTQ，也不重新生成 QC。输入为 `snipr-counts-v1` 清单，旧 counts 文件不能只改文件名冒充检查点。counts 不保留质量、read ID 或配对信息，原始数据仍需保存。更换参考无需旧 work 缓存。
-
-原生扫描器将全文件逐碱基校验、GC、质量总和和 Q30 合并为一遍统计，并采用缓冲区行扫描。全量和 first-N 统计定义保持不变。原有 Python QC 和 Perl 计数入口继续保留用于兼容。
+导入会核验 schema、样本、压缩和解压内容 SHA256、排序唯一性、总读数、唯一序列数及 QC 完成证据，随后只做参考计数/矩阵，不读取原始 FASTQ、不编译扫描器，也不重新生成 QC。输入为 `snipr-counts-v1` 清单，旧 counts 文件不能只改文件名冒充检查点。counts 不保留质量、read ID 或配对信息，原始数据仍需保存。更换参考无需旧 work 缓存。
 
 ## 常见问题
 
