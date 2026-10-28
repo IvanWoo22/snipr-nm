@@ -1,593 +1,129 @@
-# SNIPR-Nm — Small RNA Nm Ratio Analysis Pipeline
+# SNIPR-Nm
 
-SNIPR-Nm（Small RNA Integration-based Polyadenylation and Ligation for Nm detection）是配套小 RNA 3' 端 2'-O-甲基化（Nm）检测方法的高通量分析流程。同步输出每个小 RNA 的**表达量**和 **Nm 修饰比例**，适用于植物、动物组织或任何 small RNA 文库。
+SNIPR-Nm 使用 Cutadapt 去接头、PEAR 合并双端 reads，再按参考序列统计 **exact** 和 **polyA** 两类读数。内置 QC 汇总原始 R1/R2、去接头 R1/R2 和合并 reads 的数量、长度及质量。流程需要明确提供参考 FASTA，不预设物种。
 
-> 相关文献：Tang et al. "SNIPR-Nm reveals small RNA methylation ratio" (bioRxiv, 2025)
+## 运行环境
 
----
+本次已验证：Nextflow 25.10.4、Java 21、Cutadapt 5.2、PEAR 0.9.11、Python 3.12、系统 Perl、gzip。Python 脚本仅依赖标准库；Perl 使用 `IO::Uncompress::Gunzip`。不再需要 Biopython、NumPy、tsv-join 或在线图表库。
 
-## 目录结构
-
-```
-snipr-nm/
-├── SNIPR-Nm.nf          # 流程主文件
-├── nextflow.config      # 参数配置文件
-├── samplesheet.csv      # 样本列表（需填写）
-├── ath_mirna_neo.fa     # miRNA 参考序列（替换为你自己的）
-├── bin/
-│   ├── fastq2count.pl   # FASTQ → 序列计数表
-│   ├── mirna_count.pl   # miRNA 比对计数 + poly-A 检测
-│   ├── snipr_qc.py      # 小 RNA-seq 质控分析
-│   └── aggregate_qc.py  # 汇总所有样本的质控报告
-└── README.md
-```
-
----
-
-## 背景：什么是 SNIPR-Nm？
-
-3' 端 2'-O-甲基化（Nm）是调控小 RNA 稳定性与功能的重要修饰。植物中 HEN1 介导的甲基化几乎覆盖所有小 RNA；动物中 Nm 主要出现在 piRNA 上，近期研究也发现哺乳动物 miRNA 存在部分甲基化修饰。
-
-**现有技术的局限：**
-- 传统 small RNA-seq：依赖接头连接，Nm 修饰的 RNA 因连接效率低而被**低估**
-- Stem-loop RT-qPCR：可精确定量特定小 RNA，但**无法报告甲基化状态**
-- β-elimination 或 poly(A) 加尾 qPCR：可检测 3' Nm，但只能针对特定靶标、需要大上样量、无法绝对定量
-
-**SNIPR-Nm 的解决方案：**
-利用 poly(A) polymerase 和一种特殊连接酶的组合，在同一反应中同步检测小 RNA 的**表达量**和 **Nm 修饰比例**。具体原理：
-1. poly(A) polymerase 对 RNA 进行加尾处理
-2. Nm 修饰的 RNA 因 3' 端被保护而**不被加尾**；无修饰的 RNA 被添加 poly-A 尾
-3. 通过连接酶差异扩增，区分修饰与未修饰的分子
-4. 结合高通量测序，实现全转录组层面的 Nm ratio 定量
-
-该方法已成功应用于小鼠睾丸组织，获得可靠的 piRNA 和 miRNA Nm 修饰比例数据。
-
----
-
-## 第一步：安装依赖软件
-
-### 用 conda（推荐）
+本机已准备好的环境可直接使用：
 
 ```bash
-# 创建环境
-conda create -n snipr -c bioconda -c conda-forge \
-    nextflow cutadapt pear tsv-utils "python>=3.9"
-
-# 激活并安装 Python 依赖
-conda activate snipr
-pip install biopython
-
-# pear 建议从 KantorLab 频道安装（版本更新）：
-# conda install -n snipr -c kantorlab pear
-# 若无该频道，用 bioconda 版本也可以：
-# conda install -n snipr -c bioconda pear
-
-# 确认所有工具就位
-which nextflow cutadapt pear python3 perl tsv-join
+cd /Users/ivanwoo/snipr-nm
+source analysis/20260930/env.sh
+nextflow run SNIPR-Nm.nf --help
 ```
 
-**各软件作用：**
-| 软件 | 用途 |
-|------|------|
-| `nextflow` | 流程运行引擎 |
-| `cutadapt` | 去除接头序列 |
-| `pear` | 合并 PE reads |
-| `perl` | 运行 miRNA 计数脚本 |
-| `python3` + biopython | 质控脚本 |
-| `tsv-utils` | 合并多个样本的计数表 |
+本机使用 `scripts/nextflow-local.sh` 启动既有 JAR，补齐 Java 21 模块参数，已验证任务缓存恢复；不要直接使用简化的 `java -jar` 启动方式。正式运行与续跑需使用不同的 trace 文件名。
 
-### 直接使用系统已有的软件
+其他环境请将上述工具加入 PATH，或指定 `--cutadapt_bin`、`--pear_bin`、`--perl_bin`、`--py_bin` 的可执行文件路径。这些参数是文件名/路径，不是附带参数的 shell 命令。工具升级后应使用新工作目录或关闭缓存重新验证；Nextflow 不会根据 PATH 中程序的版本自动识别软件升级。
 
-如果系统已装好上述工具且有 biopython，可以跳过 conda。用 `which <命令>` 确认能找得到即可。
+## 输入
 
----
-
-## 第二步：准备样本列表
-
-编辑 `samplesheet.csv`，填入你自己的数据路径：
+CSV 必须包含 `sample_id,R1,R2`，可额外提供 `R1_md5,R2_md5`，对应压缩文件本身的 MD5。相对路径以 **CSV 所在目录** 为基准；含逗号的路径须按 CSV 标准加引号。单个 FASTQ 不可重复用于多个样本或两个 mate。样本 ID 仅允许字母、数字、点、下划线、连字符，须以字母或数字开头；`Name` 及以 `_polyA` 结尾的 ID 保留给输出列名。
 
 ```csv
 sample_id,R1,R2
-U1,/home/用户名/data/U1_1.fq.gz,/home/用户名/data/U1_2.fq.gz
-U2,/home/用户名/data/U2_1.fq.gz,/home/用户名/data/U2_2.fq.gz
+UM-101,/path/to/UM-101_R1.fastq.gz,/path/to/UM-101_R2.fastq.gz
+UM-102,/path/to/UM-102_R1.fastq.gz,/path/to/UM-102_R2.fastq.gz
 ```
 
-- `sample_id`：样本名（避免中文和特殊字符）
-- `R1` / `R2`：FASTQ 文件的**完整绝对路径**
+FASTQ 支持普通文件和 gzip，要求标准四行记录、Phred+33、ACGTN 序列。Cutadapt 检查配对记录；后续计数/QC 检查格式和数量守恒。输入检查记录 SHA256、MD5、大小和修改时间，Cutadapt 前后再次校验压缩文件内容。提供预期 MD5 才能将交付方校验值与当前文件比较；未提供时，哈希只能证明流程期间的文件身份，不能证明上游传输已完成。必须等待上传/复制结束后再运行。
 
-**如何获取绝对路径？**
-```bash
-cd /你的数据目录
-pwd    # 打印绝对路径
-ls *.fq.gz  # 确认文件名
-```
+参考 FASTA 支持多行序列、大小写及 U→T 标准化；序列须为 ACGTN 且至少 4 nt。保留完整 header、顺序、全部条目和零计数，包括外参。重复名称报错；同序列不同名称分别输出，因此**不能将所有参考行相加当作去重后的匹配 reads 数**。本流程不会自动从混合参考中筛选 miRNA；要只分析 miRNA 和外参，须输入相应参考子集。
 
----
-
-## 第三步：确认软件路径
+## 运行和资源
 
 ```bash
-conda activate snipr
-which cutadapt   # 输出如 /home/xxx/miniconda3/envs/snipr/bin/cutadapt
-which pear
-which python3
-which perl
-```
-
-把这些路径填入 `nextflow.config` 对应行（如 `params.cutadapt_bin = "完整路径"`）。如果命令在 PATH 中能直接找到，用命令名即可（如 `"cutadapt"`），无需完整路径。
-
----
-
-## 流程架构
-
-在运行流程前，建议先了解整体处理步骤：
-
-```
-输入 FASTQ（PE 小 RNA 文库）
-    ↓
-[Cutadapt]  去除接头序列
-    ↓
-[PEAR]       合并 PE reads
-    ↓
-[fastq2count] 转为序列计数表
-    ↓
-[mirna_count] 与 miRNA 参考比对
-    ↓           同时检测 poly-A 尾（= 无 Nm 修饰的分子）
-    ↓
-[annotate]    为每个样本生成唯一文件名（避免名称冲突）
-    ↓
-[merge]       所有样本横向合并成一个表
-    ↓
-[QC]          质控分析（长度分布、质量、复杂度）
-    ↓
-[multiqc]     汇总所有样本的质控报告
-```
-
-**各步骤说明：**
-| 步骤 | 功能 | 输出文件 |
-|------|------|---------|
-| Cutadapt | 去除接头序列，去除低质量 reads | clean_R1/R2.fq.gz |
-| PEAR | 合并配对-end reads | assembled.assembled.fastq |
-| fastq2count | 序列去重计数 | reads.count.tsv |
-| mirna_count | 与 miRNA 参考比对，检测 poly-A 尾 | mirna.count.tsv |
-| annotate | 添加样本名前缀 | mirna.{样本}.annotated.tsv |
-| merge | 合并所有样本结果 | mirna.merged.tsv |
-| QC | 质控分析 | *_qc_metrics.json, *_qc_report.html |
-| multiqc | 生成汇总报告 | multiqc_report.html |
-
----
-
-## 第四步：运行流程
-
-```bash
-cd /path/to/snipr-nm
-
 nextflow run SNIPR-Nm.nf \
-    --samplesheet samplesheet.csv \
-    --mirna_fa ath_mirna_neo.fa \
-    --outdir ./results
+  --samplesheet samplesheet.csv \
+  --mirna_fa /path/to/hsa_miRNA_external.fa \
+  --outdir results \
+  -work-dir work \
+  -with-trace trace.tsv
+
+# 保留同一 work 目录，增加 -resume 即可续跑
+nextflow run SNIPR-Nm.nf \
+  --samplesheet samplesheet.csv \
+  --mirna_fa /path/to/hsa_miRNA_external.fa \
+  --outdir results -work-dir work -resume
 ```
 
-**断点续跑**（中断后恢复，跳过已完成的步骤）：
-```bash
-nextflow run SNIPR-Nm.nf \
-    --samplesheet samplesheet.csv \
-    --mirna_fa ath_mirna_neo.fa \
-    --outdir ./results \
-    -resume
-```
+默认适用于当前 8 核 / 16 GiB 本机：本地调度预算 8 CPU、12 GB、最多 2 个任务；Cutadapt 和 PEAR 各用 4 线程。资源值是 Nextflow 的调度预约，不是操作系统强制限额。不要同时启动多个全量流程并假定它们共享该预算。集群需提供对应 executor 配置，本仓库没有预置 LSF 配置。
 
----
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `--samplesheet` | `samplesheet.csv` | 输入样本表 |
+| `--mirna_fa` | 必填 | miRNA/外参参考 FASTA |
+| `--outdir` | `./results` | 发布目录 |
+| `--adaptor_r1` | `AGATCGGAAGAGCACA` | R1 的 3′ 接头 |
+| `--adaptor_r2` | `GATCGTCGGACTGTAGAA` | R2 的 3′ 接头 |
+| `--cutadapt_opts` | `-O 5 -m 17 -e 0.18 --discard-untrimmed` | 原有去接头规则；不额外做质量修剪 |
+| `--pear_min_ovlp` | `17` | PEAR **`-v`**，最小重叠长度 |
+| `--pear_min_length` | `17` | PEAR **`-n`**，最小合并长度 |
+| `--pear_memory` | `1G` | PEAR `-y` 的工作内存参数 |
+| `--cutadapt_threads` / `--pear_threads` | `4` / `4` | 两步骤线程数 |
+| `--qc_sample_reads` | `100000` | 各阶段详细 QC 的前 N 条 reads |
+| `--local_cpus` / `--local_memory` | `8` / `12 GB` | 本地调度预算 |
+| `--local_queue_size` | `2` | 本地并行任务上限 |
 
-## 参数说明
+`cutadapt_opts` 是受信任用户提供的 shell 选项串，不应来自不可信输入。改变接头、过滤或 PEAR 参数会改变进入计数的 reads，必须保存运行参数并重新验证。
 
-### 必需参数
+## 计数定义与输出
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--samplesheet` | `samplesheet.csv` | 样本列表文件路径（CSV格式，需包含sample_id、R1、R2三列） |
-| `--mirna_fa` | `ath_mirna_neo.fa` | miRNA 参考序列 FASTA 文件路径 |
-| `--outdir` | `./results` | 输出目录路径（**建议使用绝对路径**，避免相对路径导致的文件找不到问题） |
+对每个参考序列：
 
-### 可选参数
+- **exact (E)**：read 与参考序列完全相同。
+- **polyA (P)**：read 以完整参考序列开头，剩余尾巴为 `AA`、`AAA`，或长度大于 3 且 A 比例至少 75%。单个 `A` 不计入 polyA；允许长尾中至多 25% 非 A 碱基。
+- 同一参考的 E 和 P 互斥；`classified_total = E + P`。
+- `no_tail_fraction = E / (E + P)`；分母为 0 时为 `NA`。它是分类读数中的无尾比例，**并非经过实验标定的绝对 Nm 比例**，也不是 `(E-P)/E`。
 
-#### 接头序列参数
+例如 E=120、P=3，classified_total=123，无尾比例为 120/123≈0.97561。同序列别名及前缀重叠的参考可共享 reads，流程保留这种历史计数语义。
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--adaptor_r1` | `AGATCGGAAGAGCACA` | R1 端接头序列（小 RNA 文库常用 Illumina Small RNA TruSeq 接头） |
-| `--adaptor_r2` | `GATCGTCGGACTGTAGAA` | R2 端接头序列 |
-
-#### 线程和性能参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--cutadapt_threads` | `8` | Cutadapt 步骤使用的 CPU 线程数 |
-| `--pear_threads` | `4` | PEAR 步骤使用的 CPU 线程数 |
-
-#### PEAR 参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--pear_min_ovlp` | `17` | PEAR 最小 overlap 长度（bp）。当 R1 和 R2 的重叠区域 ≥ 此长度时才会被合并。建议范围：15-25，对于小 RNA-seq 通常使用 17-20 |
-
-### 高级参数
-
-#### cutadapt 高级选项
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--cutadapt_opts` | `-O 5 -m 17 -e 0.18 --discard-untrimmed` | Cutadapt 的高级选项字符串，各选项含义： |
-
-**`--cutadapt_opts` 详细说明：**
-
-| 选项 | 值 | 说明 |
-|------|-----|------|
-| `-O 5` | 5 | 最小接头 overlap 长度。只有当接头与序列的重叠 ≥ 5bp 时才认为是有效接头 |
-| `-m 17` | 17 | 最小 read 长度（bp）。短于此长度的 reads 会被丢弃。miRNA 通常为 18-25nt，建议设置 15-17 |
-| `-e 0.18` | 0.18 | 最大错误率（允许的不匹配数/overlap长度）。0.18 表示约 18% 的错误容忍度，平衡灵敏度和特异性 |
-| `--discard-untrimmed` | - | 丢弃没有检测到接头的 reads。这些可能是低质量或非目标片段 |
-
-**其他可用 cutadapt 选项（需手动修改 `nextflow.config`）：**
-
-| 选项 | 示例值 | 说明 |
-|------|--------|------|
-| `-q` | `20,20` | 质量修剪阈值，格式为 "前端,后端"。移除质量低于此值的碱基 |
-| `--max-n` | `0.5` | 最大 N 比例（0-1）。允许的 N 碱基比例 |
-| `-M` | `30` | 最大 read 长度。长于此长度的 reads 会被丢弃 |
-
-### 常用覆盖示例
-
-```bash
-# 基础运行（使用绝对路径输出）
-nextflow run SNIPR-Nm.nf \
-    --samplesheet samplesheet.csv \
-    --mirna_fa ath_mirna_neo.fa \
-    --outdir /home/用户名/srna_results
-
-# 更换接头序列（如果你的文库使用了不同的接头）
-nextflow run SNIPR-Nm.nf \
-    --samplesheet samplesheet.csv \
-    --mirna_fa ath_mirna_neo.fa \
-    --outdir ./results \
-    --adaptor_r1 你的R1接头序列 \
-    --adaptor_r2 你的R2接头序列
-
-# 调整线程数（根据服务器配置）
-nextflow run SNIPR-Nm.nf \
-    --samplesheet samplesheet.csv \
-    --mirna_fa ath_mirna_neo.fa \
-    --outdir ./results \
-    --cutadapt_threads 16 \
-    --pear_threads 8
-
-# 调整 PEAR overlap 参数（对于特殊文库）
-nextflow run SNIPR-Nm.nf \
-    --samplesheet samplesheet.csv \
-    --mirna_fa ath_mirna_neo.fa \
-    --outdir ./results \
-    --pear_min_ovlp 20
-
-# 完整参数示例
-nextflow run SNIPR-Nm.nf \
-    --samplesheet samplesheet.csv \
-    --mirna_fa ath_mirna_neo.fa \
-    --outdir /home/用户名/srna_results \
-    --adaptor_r1 AGATCGGAAGAGCACA \
-    --adaptor_r2 GATCGTCGGACTGTAGAA \
-    --cutadapt_threads 16 \
-    --pear_threads 8 \
-    --pear_min_ovlp 17
-
-# 断点续跑（中断后恢复）
-nextflow run SNIPR-Nm.nf \
-    --samplesheet samplesheet.csv \
-    --mirna_fa ath_mirna_neo.fa \
-    --outdir ./results \
-    -resume
-```
-
-### 参数配置文件
-
-对于频繁使用的参数组合，建议修改 `nextflow.config` 文件：
-
-```groovy
-// nextflow.config 示例配置
-params {
-    samplesheet    = "samplesheet.csv"
-    mirna_fa       = "ath_mirna_neo.fa"
-    outdir         = "/home/用户名/srna_results"  // 使用绝对路径
-    adaptor_r1     = "AGATCGGAAGAGCACA"
-    adaptor_r2     = "GATCGTCGGACTGTAGAA"
-    cutadapt_threads = 16
-    pear_threads     = 8
-    pear_min_ovlp    = 17
-}
-```
-
-修改配置文件后，运行流程时只需指定必要参数：
-
-```bash
-nextflow run SNIPR-Nm.nf --samplesheet samplesheet.csv --mirna_fa ath_mirna_neo.fa
-```
-
----
-
-## 输出结果
-
-### 目录结构
-
-```
+```text
 results/
-├── U1/
-│   ├── cutadapt.log              # 接头去除日志
-│   ├── reads.count.tsv           # 序列计数表
-│   ├── mirna.count.tsv           # miRNA 比对结果
-│   ├── mirna.U1.annotated.tsv   # 带样本名的注释文件
-│   ├── U1_qc_metrics.json        # 质控指标（JSON）
-│   ├── U1_qc_report.html         # 详细质控 HTML 报告
-│   ├── U1_quality_by_pos.json    # 每位点质量数据
-│   └── U1_length_dist.json        # 长度分布数据
-├── U2/ ... (每个样本一个子目录)
-├── mirna.merged.tsv              # 所有样本横向合并总表
-├── multiqc_report.html           # 汇总质控报告
-└── multiqc_data/                 # 质控原始数据
+├── reference_annotations.tsv          # 所有参考名称及序列，含外参
+├── mirna.merged.tsv                   # Name, S1, S1_polyA, S2, S2_polyA, ...
+├── mirna.exact.tsv                    # Name, sequence, 各样本 E
+├── mirna.polyA.tsv                    # Name, sequence, 各样本 P
+├── mirna.classified_total.tsv         # Name, sequence, 各样本 E+P
+├── mirna.no_tail_fraction.tsv         # Name, sequence, 各样本 E/(E+P)
+├── snipr_qc_report.html               # 内置 SNIPR 汇总报告，可离线查看
+├── snipr_qc_data/                     # 样本汇总 TSV、逐阶段 JSON、样本报告
+└── S1/
+    ├── input_manifest.json
+    ├── cutadapt.log / cutadapt.json
+    ├── pear.log / pear.json           # PEAR 日志及中间文件压缩校验清单
+    ├── reads.count.tsv.gz             # sequence/count，无表头
+    ├── mirna.count.tsv                # Name/exact/polyA，有表头
+    ├── mirna.S1.annotated.tsv          # Name/S1/S1_polyA
+    ├── S1_qc_metrics.json
+    ├── S1_quality_by_pos.json
+    ├── S1_length_dist.json
+    └── S1_qc_report.html
 ```
 
-### 各输出文件详细说明
+所有矩阵遵循 samplesheet 的样本顺序及 FASTA 的参考顺序。汇总只读 Nextflow 已暂存的文件，缺少样本或参考不一致会报错。单独运行 `perl bin/mirna_count.pl counts.tsv[.gz] reference.fa` 仍输出旧式无表头 TSV；加 `--header` 则输出 Name/exact/polyA。`fastq2count.pl` 接受 stdin 或一个 FASTQ 路径。
 
-#### 1. cutadapt.log（接头去除日志）
+## QC、磁盘与恢复边界
 
-记录 Cutadapt 处理 FASTQ 文件的统计信息：
+每个样本对 raw R1/R2、clean R1/R2、merged 五个阶段做全文件 reads、bases、长度分布、平均质量、Q30 和 GC 统计。18–25 nt 比例的分母是该文件**所有 reads**，大于 50 nt 的 reads 也保留。位置质量、序列冗余、二核苷酸熵及完整接头 motif 使用各阶段前 N 条 reads，明确记录样本量，不能当作随机抽样估计。序列冗余不是 PCR duplication；完整 motif 命中率不等于部分接头残留率。空分母输出 null/NA。QC 不会过滤 reads。
 
-```log
-This is cutadapt 4.9 with Python 3.11.0
-Command line parameters: -a AGATCGGAAGAGCACA -A GATCGTCGGACTGTAGAA ...
-Command line parameters: -a AGATCGGAAGAGCACA -A GATCGTCGGACTGTAGAA -O 5 -m 17 -e 0.18 ...
-Finished 4 processes (0.4s wall time, 14.6 MB peak memory)
+校验 raw 配对数量、Cutadapt 输入/输出、PEAR 合并/未合并/丢弃的数量以及序列计数总和。去接头后为零的样本保留零计数参考行，跳过会对空输入崩溃的 PEAR。报告是自带的 SNIPR 报告，不是 MultiQC；旧 `multiqc_report.html` 文件名已改为 `snipr_qc_report.html`。
 
-=== Adapter 1 (first read) ===
-Sequence: AGATCGGAAGAGCACA; Type: regular 3'; Trimmed: 1250 reads
+PEAR 的四个 FASTQ 在任务内压缩，每个文件通过解压 SHA256 回验后才移除对应的未压缩副本；压缩版保留在 work 目录供续跑。**PEAR 运行时仍需容纳该样本全部未压缩输出**。工作目录会随样本累计，当前实现不自动删除已完成样本的缓存，也没有磁盘配额/剩余空间闸门。应在正式批量运行前预留空间，并在确认最终输出后由使用者决定是否清理 work；清理后无法复用相应缓存。
 
-=== Adapter 2 (second read) ===
-Sequence: GATCGTCGGACTGTAGAA; Type: regular 3'; Trimmed: 980 reads
+深度缓存按输入内容而非仅时间戳判断变更；相关脚本也作为任务输入。其代价是额外读取大文件、计算哈希。失败会明确报告失败，发布目录可能存在部分结果，不能据此认定整批完成；成功须以 Nextflow 正常退出和全部 QC/汇总完成为准。建议每次参数或参考版本变更使用新输出目录，避免旧结果混杂。
 
-=== Summary ===
-Reads written (passing filters): 85000
-```
+计数阶段内存仍随唯一序列数增加；QC 的序列抽样内存随 N 和读长增加，但不再随全量 reads 数增加。五阶段全文件 QC 增加 I/O 和 CPU 开销。macOS 无容器的 Nextflow trace 不提供可靠的 CPU/RSS 指标，不能把空值当成低占用。
 
-**关键指标解读：**
-
-| 指标 | 说明 | 参考值 |
-|------|------|--------|
-| Adapter 1/2 Trimmed | 成功去除接头的 reads 数量 | - |
-| Reads written | 通过质量过滤的最终 reads 数量 | - |
-| 未去除接头 reads 比例 | 使用 `--discard-untrimmed` 丢弃的 reads | < 20% 为正常 |
-
-#### 2. reads.count.tsv（序列计数表）
-
-将 FASTQ 转为序列计数表，每行一条唯一序列及其出现次数：
-
-```tsv
-sequencount
-UUUAAAGCUAUAGUAGUAGUACCCGUACAUCUACUAUAUACUAUAUACUAUAUACU  125
-AGCUAGCUAGCUAGCUAGCUA  98
-UCGUACGUCAGCUAGCUAGCU  67
-...
-```
-
-#### 3. mirna.count.tsv（miRNA 比对结果）
-
-每个参考 miRNA 的精确匹配和 poly-A 尾检测计数：
-
-```tsv
-Name    exact  polyA
-ath-miR156a-5p  120  3
-ath-miR166b     45   1
-ath-miR167a     89   2
-ath-miR172a     67   0
-...
-```
-
-**列说明：**
-
-| 列名 | 说明 |
-|------|------|
-| Name | miRNA 名称（来自参考 FASTA） |
-| exact | 精确匹配的序列计数 |
-| polyA | 检测到 poly-A 尾的序列计数（无 Nm 修饰） |
-
-#### 4. mirna.{样本}.annotated.tsv（带样本名的注释文件）
-
-在 mirna.count.tsv 基础上添加样本名前缀，便于合并：
-
-```tsv
-Name    U1  U1_polyA
-ath-miR156a-5p  120  3
-ath-miR166b     45   1
-ath-miR167a     89   2
-```
-
-#### 5. mirna.merged.tsv（合并总表）
-
-所有样本横向合并的结果表：
-
-```tsv
-Name            U1    U1_polyA  U2    U2_polyA  U3    U3_polyA
-ath-miR156a-5p  120   3         98    5         145   12
-ath-miR166b     45    1         67    2         78    3
-ath-miR167a     89    2         102   1         156   8
-ath-miR172a     67    0         89    0         123   2
-ath-miR393a     23    5         34    8         45    15
-...
-```
-
-#### 6. 质控输出文件
-
-- `*_qc_metrics.json`：质控指标汇总（JSON 格式）
-- `*_qc_report.html`：详细质控 HTML 报告（可在浏览器中打开查看）
-- `*_quality_by_pos.json`：每个位点的质量分布数据
-- `*_length_dist.json`：read 长度分布数据
-- `multiqc_report.html`：所有样本的汇总质控报告
-- `multiqc_data/`：质控原始数据目录
-
-### Nm 修饰比例计算示例
-
-基于 `mirna.merged.tsv` 中的数据，可以计算 Nm 修饰比例：
-
-**示例数据：**
-
-```tsv
-Name            U1    U1_polyA  U2    U2_polyA
-ath-miR156a-5p  120   3         98    5
-ath-miR166b     45    1         67    2
-```
-
-**计算方法：**
-
-对于 U1 样本中的 ath-miR156a-5p：
-
-- 总读数 = 120
-- poly-A 尾读数 = 3（无 Nm 修饰）
-- 疑似 Nm 修饰 = 120 - 3 = 117
-- **Nm 修饰比例 = (120 - 3) / 120 = 97.5%**
-
-**Python 计算脚本示例：**
-
-```python
-import pandas as pd
-
-# 读取合并结果
-df = pd.read_csv('results/mirna.merged.tsv', sep='\t')
-
-# 计算每个样本的 Nm 修饰比例
-for sample in ['U1', 'U2']:
-    total_col = sample
-    polya_col = f'{sample}_polyA'
-    nm_ratio_col = f'{sample}_Nm_ratio'
-    
-    df[nm_ratio_col] = (df[total_col] - df[polya_col]) / df[total_col]
-    df[nm_ratio_col] = df[nm_ratio_col].fillna(0)
-
-# 保存结果
-df.to_csv('results/mirna.merged.with_nm_ratio.tsv', sep='\t', index=False)
-
-print(df[['Name', 'U1', 'U1_polyA', 'U1_Nm_ratio']].head())
-```
-
-**输出示例：**
-
-```tsv
-Name            U1    U1_polyA  U1_Nm_ratio
-ath-miR156a-5p  120   3         0.975
-ath-miR166b     45    1         0.978
-ath-miR167a     89    2         0.978
-```
-
-### 完整运行示例
-
-#### 1. 准备样本列表
-
-```csv
-sample_id,R1,R2
-WT_rep1,/data/WT_rep1_1.fq.gz,/data/WT_rep1_2.fq.gz
-WT_rep2,/data/WT_rep2_1.fq.gz,/data/WT_rep2_2.fq.gz
-KO_rep1,/data/KO_rep1_1.fq.gz,/data/KO_rep1_2.fq.gz
-KO_rep2,/data/KO_rep2_1.fq.gz,/data/KO_rep2_2.fq.gz
-```
-
-#### 2. 运行流程
+## 验证及本批数据的历史关系
 
 ```bash
-cd /path/to/snipr-nm
-
-nextflow run SNIPR-Nm.nf \
-    --samplesheet samplesheet.csv \
-    --mirna_fa ath_mirna_neo.fa \
-    --outdir /home/用户名/srna_results \
-    -resume
+python3 -m unittest discover -s tests -v
+python3 tests/run_nextflow_smoke.py --evidence /path/to/smoke-evidence
 ```
 
-#### 3. 查看运行日志
+单元回归覆盖尾巴边界、别名、外参、零计数、输入损坏、QC 分母、压缩回验和严格汇总；实际 Nextflow 测试覆盖正常运行、全任务缓存续跑、空文库及错误 MD5。
 
-```log
-N E X T F L O W  ~  version 23.04.0
-Launching `SNIPR-Nm.nf` [sad_ardinghelli] DSL2 - revision: 8e3a7c3a8
-------------------------------------------------------
-executor >  local (6)
-[aa/bc1234] process > CUTADAPT (WT_rep1)       [100%] 1 of 1, CPU: 8
-[ab/cd5678] process > PEAR (WT_rep1)           [100%] 1 of 1, CPU: 4
-[ac/ef9012] process > FASTQ2COUNT (WT_rep1)   [100%] 1 of 1
-[ad/fg3456] process > MIRNA_COUNT (WT_rep1)   [100%] 1 of 1
-[ae/gh7890] process > ANNOTATE_SAMPLE (WT_rep1) [100%] 1 of 1
-[ef/ij1234] process > MERGE_SAMPLES           [100%] 1 of 1
-[fg/kl5678] process > QC_SAMPLE (WT_rep1)     [100%] 1 of 1
-[gh/mn9012] process > MULTIQC                 [100%] 1 of 1
-==================================================
-SNIPR-Nm run complete
-Results : /home/用户名/srna_results
-Merged  : /home/用户名/srna_results/mirna.merged.tsv
-QC html : /home/用户名/srna_results/multiqc_report.html
-==================================================
-```
-
-#### 4. 检查输出文件
-
-```bash
-# 查看输出目录结构
-ls -la /home/用户名/srna_results/
-
-# 查看合并结果
-head -n 10 /home/用户名/srna_results/mirna.merged.tsv
-
-# 查看质控报告
-open /home/用户名/srna_results/multiqc_report.html
-```
-
----
-
-## 质控指标
-
-`snipr_qc.py` 在 clean R1 上计算以下指标：
-
-| 指标                   | 含义                        | 参考阈值      |
-|----------------------|---------------------------|-----------|
-| **miRNA 18–25nt 占比** | 文库中 miRNA 典型长度的比例         | > 30% 为良好 |
-| **Adapter 污染率**      | 3' 端仍有接头的 reads           | < 5% 为良好  |
-| **低复杂度 reads**       | 重复序列比例高（可能是 rRNA/tRNA 污染） | < 20%     |
-| **重复率**              | 重复序列比例                    | 视文库复杂度而异  |
-| **平均质量**             | Phred 分数                  | Q30+ 为良好  |
-
-> ⚠️ 阈值仅供参考，实际应结合文库构建方案和实验背景判断。
-
----
-
-## 常见问题
-
-### Q：报错 `No such file or directory`
-检查 `samplesheet.csv` 里的路径是否为**完整绝对路径**，文件是否真实存在：
-```bash
-ls -la /完整路径/U1_1.fq.gz
-```
-
-### Q：质控数据全是 0 或报告无数据
-确认 `--outdir` 使用**绝对路径**：
-```bash
---outdir /home/用户名/srna_results
-```
-相对路径（`./results`）在某些情况下会导致 Python 脚本无法找到 JSON 文件。
-
-### Q：想增加更多样本
-直接在 `samplesheet.csv` 中追加行，pipeline 无需任何修改。
-
-### Q：某步骤报错了怎么查原因
-```bash
-nextflow run SNIPR-Nm.nf ... -resume
-# 查看 .nextflow.log 或对应 work 目录下的 .command.log
-```
-
----
-
-## 参考
-
-Tang et al. "A high-throughput method SNIPR-Nm reveals small RNA methylation ratio." bioRxiv (2025). doi: 10.64898/2025.12.11.693694
+20260930 批次既有 `analysis/20260930/hsa_primary/` 是此前独立执行器处理 **21 个样本全量数据**的结果，本次代码优化不会把那些结果改称为新版 Nextflow 重跑结果。历史源文件已按原 SHA256 清单归档到 `analysis/20260930/provenance/baseline_source/`。新版根目录 Perl 计数器对 21 个全量序列计数表、每样本 2664 个 hsa miRNA/外参条目逐项核对；真实 FASTQ 验证使用 UM-101 和 UM-121 各前 10 万对 reads。证据位于 `analysis/20260930/validation/optimized_pipeline/`。
