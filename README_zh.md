@@ -11,7 +11,7 @@ SNIPR-Nm 使用 Cutadapt 去接头、PEAR 合并双端 reads，再按参考序�
 - [背景：什么是 SNIPR-Nm？](#背景什么是-snipr-nm)
 - [目录结构](#目录结构)
 - [流程架构](#流程架构)
-- [运行环境](#运行环境)
+- [初次安装与配置](#初次安装与配置)
 - [更新已安装的流程代码](#更新已安装的流程代码)
 - [输入](#输入)
 - [运行和资源](#运行和资源)
@@ -79,56 +79,99 @@ raw + clean + merged QC → 样本报告 → SNIPR 批次汇总报告
 
 上图表示数据处理逻辑。`checkpoint` 将预处理拆为可独立缓存的步骤；`compact` 将预处理和 clean/merged QC 放入样本任务，验证后回收其临时 FASTQ，raw QC 仍独立缓存；两者采用相同计数定义。`--counts_sheet` 则从已验证的 counts 检查点进入参考重计数。旧 Perl 序列计数入口仍可单独使用，Nextflow 主流程使用原生扫描器；报告由内置 SNIPR 脚本生成。
 
-## 运行环境
+## 初次安装与配置
 
-本次已验证：Nextflow 25.10.4、Java 21、Cutadapt 5.2、PEAR 0.9.11、Python 3.12、系统 Perl、gzip，以及支持 C++17 的编译器和 zlib 开发库。Python 脚本仅依赖标准库；Perl 使用 `IO::Uncompress::Gunzip`。原生扫描器由 Nextflow 的 BUILD_SCANNER 编译并缓存；macOS 可使用 Xcode Command Line Tools，Linux 需要相应编译器和 zlib headers。Python 功能使用 `hashlib.file_digest`，要求 Python 3.11 或更新版本。不再需要 Biopython、NumPy、tsv-join 或在线图表库。
+### 1. 安装运行环境
 
-安装上述依赖并激活对应环境后，在项目目录中运行：
+Linux/macOS 用户可使用 Conda；尚未安装时，先按 [Miniforge 官方说明](https://github.com/conda-forge/miniforge#install) 安装与系统架构匹配的版本。已有可用环境可跳过创建步骤。下面固定本流程已验证的主要工具版本：
 
 ```bash
-# 确保 Nextflow、Java 和所需工具已加入 PATH。
+conda create -n snipr --override-channels --strict-channel-priority \
+  -c conda-forge -c bioconda \
+  nextflow=25.10.4 openjdk=21 python=3.12 cutadapt=5.2 pear=0.9.11 \
+  perl gzip git
+conda activate snipr
+```
+
+原生 QC 扫描器还需要 C++17 编译器和 zlib 开发文件，Nextflow 会自动编译并缓存它。按操作系统安装一次即可：
+
+```bash
+# Ubuntu / Debian
+sudo apt-get update
+sudo apt-get install build-essential zlib1g-dev
+```
+
+```bash
+# macOS：安装 Xcode Command Line Tools，随后完成弹出的安装步骤
+xcode-select --install
+```
+
+其他 Linux 发行版安装对应的 C++ 编译器及 zlib 开发包。确认环境中的工具可用：
+
+```bash
+command -v nextflow java cutadapt pear python3 perl gzip c++
+nextflow -version
+java -version
+python3 --version
+perl -MIO::Uncompress::Gunzip -e 'print "Perl gzip support OK\n"'
+```
+
+Python 要求 3.11+，脚本仅使用标准库；Perl 需要 `IO::Uncompress::Gunzip`。不再需要 Biopython、NumPy 或 tsv-join。安装方式可参考 [Bioconda](https://bioconda.github.io/) 和 [Nextflow 官方文档](https://docs.seqera.io/nextflow/install)。
+
+### 2. 获取代码并准备输入
+
+```bash
+git clone https://github.com/IvanWoo22/snipr-nm.git
+cd snipr-nm
+cp samplesheet.csv my_samples.csv
 nextflow run SNIPR-Nm.nf --help
 ```
 
-若已在 `.runtime/nextflow/` 或 `NXF_HOME` 中安装 Nextflow 25.10.4 JAR，可使用 `scripts/nextflow-local.sh` 启动；该脚本包含 Java 21 模块参数，需要先配置相应的 `JAVA_HOME`，不会安装依赖。正式运行与续跑需使用不同的 trace 文件名。
+编辑 `my_samples.csv`，保留 `sample_id,R1,R2` 表头，在下方填写真实样本名和双端 FASTQ 路径；再准备与研究物种、目标 RNA 及外参相符的参考 FASTA。格式示例和约束见[输入](#输入)。每次打开新终端运行前，先执行 `conda activate snipr`。
 
-其他环境请将上述工具加入 PATH，或指定 `--cutadapt_bin`、`--pear_bin`、`--perl_bin`、`--py_bin`、`--cxx_bin` 的可执行文件路径。这些参数是文件名/路径，不是附带参数的 shell 命令。工具升级后应使用新工作目录或关闭缓存重新验证；Nextflow 不会根据 PATH 中程序的版本自动识别软件升级。
+### 3. 保存配置并运行
+
+在项目目录新建自己的 `run.config`，替换参考路径，并核对接头是否与文库一致：
+
+```groovy
+params {
+    samplesheet = 'my_samples.csv'
+    mirna_fa = '/path/to/reference.fa'
+    outdir = 'results'
+    adaptor_r1 = 'AGATCGGAAGAGCACA'
+    adaptor_r2 = 'GATCGTCGGACTGTAGAA'
+}
+```
+
+工具在 PATH 中可找到时，无需配置绝对路径；安装在其他位置时，可在 `run.config` 中设置 `params.pear_bin = '/full/path/to/pear'`，其他工具对应 `cutadapt_bin`、`perl_bin`、`py_bin` 和 `cxx_bin`。这些值只填写可执行文件路径。将个人样本表和配置单独保存，可以避免日后更新仓库时反复修改自带文件。
+
+```bash
+nextflow run SNIPR-Nm.nf -c run.config \
+  -work-dir work -with-trace trace.tsv
+```
+
+完成后查看 `results/mirna.merged.tsv` 和 `results/snipr_qc_report.html`。续跑在同一启动目录执行原命令并增加 `-resume`，为 trace 使用新文件名，保留原输入、参数、`work/` 和 `.nextflow/`。资源调整及直接用命令行传参的写法见[运行和资源](#运行和资源)。
+
+<details>
+<summary>使用已有环境或离线 Nextflow</summary>
+
+已有环境只需满足上述依赖并将工具加入 PATH。若已有 Nextflow 25.10.4 JAR 位于 `.runtime/nextflow/` 或 `NXF_HOME`，可配置 Java 21 的 `JAVA_HOME`，以 `scripts/nextflow-local.sh` 替代 `nextflow`；该启动器不会安装依赖。升级工具版本后应使用新 work 目录验证，PATH 中工具的版本变化不会自动使 Nextflow 缓存失效。
+
+</details>
 
 ## 更新已安装的流程代码
 
-等待正在运行的流程结束后，在原项目目录更新代码。以下命令从 `origin/main` 获取已经发布到远端的版本。先检查本地修改；需要保留的源码改动应先提交到独立分支或另存，再继续更新。本地数据和运行目录无需加入 Git。
+等正在运行的流程结束，保存本地源码修改并激活原运行环境后，执行：
 
 ```bash
 cd /path/to/snipr-nm
-# 先检查是否有未保存的源码改动。
 git status --short
-git diff --stat
 git switch main
-
-# 给当前代码保留一个版本参照，再获取并查看远端更新。
-git branch "codex/before-update-$(date +%Y%m%d-%H%M%S)"
-git fetch origin
-git log --oneline HEAD..origin/main
-
-# 只允许快进更新；本地与远端分叉时会停止。
-git merge --ff-only origin/main
-git log -1 --oneline
+git pull --ff-only origin main
 nextflow run SNIPR-Nm.nf --help
 ```
 
-如果 Git 提示本地修改冲突或分支已经分叉，应先处理这些改动再更新；上述命令不会强行覆盖本地历史，也不删除分析文件。拉取仓库只更新流程代码，不会安装或升级 Nextflow、Python、Cutadapt 或 PEAR。此版本需要 Python 3.11+、C++17 编译器及 zlib headers；原生扫描器由 Nextflow 自动编译和缓存。
-
-更新后，若继续使用原工作目录，可执行：
-
-```bash
-nextflow run SNIPR-Nm.nf \
-  --samplesheet samplesheet.csv \
-  --mirna_fa /path/to/reference.fa \
-  --outdir results -work-dir work \
-  -resume -with-trace trace.updated.tsv
-```
-
-续跑应在原启动目录执行，以便找到原 `.nextflow/` 缓存，同时保留原输入、结果/work 目录、`-profile`、`-c` 配置及分析参数，包括 `--intermediates`。上面的命令演示使用默认参数的情形。流程代码和依赖改变后，相关任务可能重新执行，不能保证所有旧任务都命中缓存；应保留 `work/` 与 `.nextflow/`。若要独立开始一轮分析，指定新的 outdir/work 目录并省略 `-resume`。
+若有未保存的源码修改或 Git 提示分支分叉，先处理后再更新；个人样本表、配置和分析数据无需提交。此操作只更新流程代码，依赖变化请看[初次安装与配置](#初次安装与配置)。更新后的续跑仍使用原命令加 `-resume`，保留原输入、配置、启动目录和 work 目录；受代码改动影响的任务可能重新执行。
 
 ## 输入
 
